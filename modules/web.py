@@ -122,21 +122,20 @@ SECURITY_HEADERS = {
 
 
 async def check_endpoint(session, base_url: str, path: str) -> dict:
+    """Probe a single path. Returns actual body byte count, not Content-Length header."""
     url = base_url.rstrip("/") + path
     try:
         async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             ct = resp.headers.get("Content-Type", "").lower()
-            raw_cl = resp.headers.get("Content-Length", "0")
-            try:
-                cl_int = int(raw_cl)
-            except (ValueError, TypeError):
-                cl_int = 0
+            # Read up to 512 KB — gives accurate size for chunked responses
+            # while preventing memory exhaustion on large files.
+            body = await resp.content.read(512 * 1024)
             return {
                 "url": url,
                 "status": resp.status,
                 "size": resp.headers.get("Content-Length", "?"),
                 "content_type": ct,
-                "content_length": cl_int,
+                "content_length": len(body),   # actual bytes, not header
                 "interesting": resp.status in (200, 301, 302, 403, 401),
             }
     except Exception:
@@ -144,6 +143,25 @@ async def check_endpoint(session, base_url: str, path: str) -> dict:
             "url": url, "status": 0, "content_type": "",
             "content_length": 0, "interesting": False,
         }
+
+
+async def get_baseline_body_size(session, base_url: str) -> int:
+    """Fetch a guaranteed-nonexistent path to establish a soft-404 baseline.
+
+    Returns the actual body byte count, or -1 if the request fails.
+    Used to detect servers that return 200 OK with identical HTML for every URL.
+    """
+    canary_url = base_url.rstrip("/") + "/this-path-does-not-exist-12345-godseye"
+    try:
+        async with session.get(
+            canary_url,
+            allow_redirects=False,
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            body = await resp.content.read(512 * 1024)
+            return len(body)
+    except Exception:
+        return -1  # baseline unavailable — skip comparison
 
 
 async def check_security_headers(session, url: str) -> dict:
@@ -257,6 +275,10 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                     phase="web",
                 ))
 
+            # Soft-404 baseline — one canary request per host
+            log(f"Fetching soft-404 baseline for {base_url}...")
+            baseline_size = await get_baseline_body_size(session, base_url)
+
             # Endpoint enumeration
             log(f"Endpoint enumeration ({len(SENSITIVE_ENDPOINTS)} paths)...")
             tasks = [check_endpoint(session, base_url, ep) for ep in SENSITIVE_ENDPOINTS]
@@ -268,14 +290,16 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                 if ep.get("status") != 200:
                     continue
 
-                path       = ep["url"].replace(base_url, "") or "/"
-                ct         = ep.get("content_type", "")
-                cl         = ep.get("content_length", 0)
-                is_html    = "text/html" in ct
+                path        = ep["url"].replace(base_url, "") or "/"
+                ct          = ep.get("content_type", "")
+                body_len    = ep.get("content_length", 0)
+                is_html     = "text/html" in ct
                 has_bin_ext = path.lower().endswith(NON_HTML_EXTENSIONS)
-                evidence   = (f"HTTP {ep['status']} | "
-                              f"Content-Type: {ct or 'unknown'} | "
-                              f"Size: {ep.get('size', '?')}")
+                evidence    = (f"HTTP {ep['status']} | "
+                               f"Content-Type: {ct or 'unknown'} | "
+                               f"Body: {body_len} bytes"
+                               + (f" (baseline: {baseline_size} bytes)"
+                                  if baseline_size >= 0 else ""))
 
                 # ── INFO paths — always informational ──────────────────────────
                 if path in INFO_PATHS:
@@ -291,12 +315,17 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                     ))
                     continue
 
-                # ── Admin paths — MEDIUM (login page) or HIGH (real content) ──
+                # ── Admin paths — baseline-aware soft-404 filtering ────────────
                 if path.startswith(ADMIN_PATH_PREFIXES):
                     if is_html:
+                        # Compare body size against the canary-path baseline.
+                        # < 500-byte difference → server returns the same HTML
+                        # for all URLs (catch-all / soft-404) → skip.
+                        if baseline_size >= 0 and abs(body_len - baseline_size) < 500:
+                            continue
                         sev  = Severity.MEDIUM
-                        desc = (f"Admin panel returning HTML (likely login page): "
-                                f"{ep['url']}")
+                        desc = (f"Admin panel returning distinct HTML content "
+                                f"(likely a real login page): {ep['url']}")
                     else:
                         sev  = Severity.HIGH
                         desc = (f"Admin panel returning non-HTML content "
