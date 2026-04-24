@@ -89,6 +89,27 @@ SENSITIVE_ENDPOINTS = [
     "/.well-known/security.txt",
 ]
 
+# ── Endpoint classification sets ──────────────────────────────────────────────
+
+# Always INFO — standard, expected public paths
+INFO_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
+
+# MEDIUM if 200+text/html (likely a login page), HIGH if 200+non-html
+ADMIN_PATH_PREFIXES = (
+    "/phpmyadmin", "/admin", "/administrator", "/wp-admin",
+    "/console", "/h2-console", "/dashboard",
+)
+
+# Non-HTML extensions that are suspicious even inside text/html responses
+NON_HTML_EXTENSIONS = (
+    ".zip", ".sql", ".bak", ".tar", ".gz", ".env",
+    ".config", ".yml", ".yaml", ".json", ".xml",
+    ".log", ".key", ".pem",
+)
+
+# Keywords that elevate severity to CRITICAL
+CRITICAL_KEYWORDS = (".env", ".git", "backup", "db.sql")
+
 SECURITY_HEADERS = {
     "X-Frame-Options": "Clickjacking protection",
     "Content-Security-Policy": "XSS/injection policy",
@@ -104,14 +125,25 @@ async def check_endpoint(session, base_url: str, path: str) -> dict:
     url = base_url.rstrip("/") + path
     try:
         async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            ct = resp.headers.get("Content-Type", "").lower()
+            raw_cl = resp.headers.get("Content-Length", "0")
+            try:
+                cl_int = int(raw_cl)
+            except (ValueError, TypeError):
+                cl_int = 0
             return {
                 "url": url,
                 "status": resp.status,
                 "size": resp.headers.get("Content-Length", "?"),
+                "content_type": ct,
+                "content_length": cl_int,
                 "interesting": resp.status in (200, 301, 302, 403, 401),
             }
     except Exception:
-        return {"url": url, "status": 0, "interesting": False}
+        return {
+            "url": url, "status": 0, "content_type": "",
+            "content_length": 0, "interesting": False,
+        }
 
 
 async def check_security_headers(session, url: str) -> dict:
@@ -233,19 +265,80 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
             port_data["endpoints"] = found_endpoints
 
             for ep in found_endpoints:
-                if ep.get("status") == 200:
-                    path = ep["url"].replace(base_url, "")
-                    sev = Severity.CRITICAL if any(x in path for x in [".env", ".git", "backup", "db.sql"]) else Severity.HIGH
+                if ep.get("status") != 200:
+                    continue
+
+                path       = ep["url"].replace(base_url, "") or "/"
+                ct         = ep.get("content_type", "")
+                cl         = ep.get("content_length", 0)
+                is_html    = "text/html" in ct
+                has_bin_ext = path.lower().endswith(NON_HTML_EXTENSIONS)
+                evidence   = (f"HTTP {ep['status']} | "
+                              f"Content-Type: {ct or 'unknown'} | "
+                              f"Size: {ep.get('size', '?')}")
+
+                # ── INFO paths — always informational ──────────────────────────
+                if path in INFO_PATHS:
                     _add(Finding(
-                        title=f"Sensitive endpoint exposed: {path}",
-                        severity=sev,
-                        description=f"Sensitive path accessible: {ep['url']}",
-                        evidence=f"HTTP {ep['status']} response",
+                        title=f"Informational endpoint: {path}",
+                        severity=Severity.INFO,
+                        description=f"Standard public path accessible: {ep['url']}",
+                        evidence=evidence,
                         mitre_tactic="Discovery",
                         mitre_technique="T1083 - File and Directory Discovery",
-                        remediation="Restrict access or remove sensitive files from web root.",
+                        remediation="Ensure no sensitive data is disclosed in this file.",
                         phase="web",
                     ))
+                    continue
+
+                # ── Admin paths — MEDIUM (login page) or HIGH (real content) ──
+                if path.startswith(ADMIN_PATH_PREFIXES):
+                    if is_html:
+                        sev  = Severity.MEDIUM
+                        desc = (f"Admin panel returning HTML (likely login page): "
+                                f"{ep['url']}")
+                    else:
+                        sev  = Severity.HIGH
+                        desc = (f"Admin panel returning non-HTML content "
+                                f"(possible direct access): {ep['url']}")
+                    _add(Finding(
+                        title=f"Admin panel accessible: {path}",
+                        severity=sev,
+                        description=desc,
+                        evidence=evidence,
+                        mitre_tactic="Discovery",
+                        mitre_technique="T1083 - File and Directory Discovery",
+                        remediation=(
+                            "Restrict admin paths via IP allowlist or "
+                            "strong authentication."
+                        ),
+                        phase="web",
+                    ))
+                    continue
+
+                # ── All other 200s — filter HTML false positives ───────────────
+                # Skip if HTML response with no binary extension clues
+                # (soft-404 / redirect page masquerading as 200)
+                if is_html and not (has_bin_ext and cl > 5000):
+                    continue
+
+                # Real finding: non-HTML content-type OR binary ext + large body
+                sev = (Severity.CRITICAL
+                       if any(kw in path for kw in CRITICAL_KEYWORDS)
+                       else Severity.HIGH)
+                _add(Finding(
+                    title=f"Sensitive endpoint exposed: {path}",
+                    severity=sev,
+                    description=f"Sensitive path is publicly accessible: {ep['url']}",
+                    evidence=evidence,
+                    mitre_tactic="Discovery",
+                    mitre_technique="T1083 - File and Directory Discovery",
+                    remediation=(
+                        "Restrict access or remove sensitive files from the "
+                        "web root. Apply server-level deny rules."
+                    ),
+                    phase="web",
+                ))
 
             # Basic SQLi test
             log(f"Basic SQLi probe...")
