@@ -1,0 +1,312 @@
+"""
+Recon Module — powered by GOD'S EYE with fallback to built-in scanner.
+"""
+
+import asyncio
+import socket
+import re
+import os
+import sys
+from pathlib import Path
+from core.orchestrator import EngagementState, Finding, Severity
+
+# ── GOD'S EYE path setup ──────────────────────────────────────────────────────
+def _add_gods_eye(path: str = None):
+    candidates = [
+        path,
+        os.environ.get("GODS_EYE_PATH"),
+        r"C:\Users\User\Documents\GODs_EYE",
+        str(Path.home() / "Documents" / "GODs_EYE"),
+    ]
+    for c in candidates:
+        if c and os.path.isdir(c) and c not in sys.path:
+            sys.path.insert(0, c)
+            return True
+    return False
+
+_add_gods_eye()
+
+COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445,
+                389, 636, 993, 995, 1433, 1521, 3268, 3269, 3306, 3389,
+                5432, 5900, 5985, 5986, 6379, 8080, 8443, 27017]
+
+STEALTH_PORTS = [21, 22, 23, 25, 53, 80, 135, 139, 443, 445, 3389, 8080]
+
+
+def get_service_name(port: int) -> str:
+    services = {
+        21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+        80: "HTTP", 110: "POP3", 135: "RPC", 139: "NetBIOS", 143: "IMAP",
+        389: "LDAP", 443: "HTTPS", 445: "SMB", 464: "Kpasswd",
+        636: "LDAPS", 993: "IMAPS", 995: "POP3S", 1433: "MSSQL",
+        1521: "Oracle", 3268: "GC-LDAP", 3269: "GC-LDAPS",
+        3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5900: "VNC",
+        5985: "WinRM-HTTP", 5986: "WinRM-HTTPS", 6379: "Redis",
+        8080: "HTTP-Alt", 8443: "HTTPS-Alt", 27017: "MongoDB",
+    }
+    return services.get(port, f"port-{port}")
+
+
+async def port_scan(target: str, ports: list = None, timeout: float = 1.0,
+                    stealth: bool = False) -> dict:
+    if ports is None:
+        ports = STEALTH_PORTS if stealth else COMMON_PORTS
+
+    if stealth:
+        timeout = max(timeout, 3.0)
+
+    open_ports = {}
+
+    async def check_port(port):
+        try:
+            if stealth:
+                await asyncio.sleep(0.1)
+            conn = asyncio.open_connection(target, port)
+            reader, writer = await asyncio.wait_for(conn, timeout=timeout)
+            banner = ""
+            try:
+                data = await asyncio.wait_for(reader.read(256), timeout=0.5)
+                banner = data.decode("utf-8", errors="ignore").strip()[:100]
+            except Exception:
+                pass
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return port, True, banner
+        except Exception:
+            return port, False, ""
+
+    if stealth:
+        # Sequential in stealth mode
+        for p in ports:
+            result = await check_port(p)
+            if result[1]:
+                open_ports[result[0]] = {"service": get_service_name(result[0]), "banner": result[2]}
+    else:
+        tasks = [check_port(p) for p in ports]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, tuple) and result[1]:
+                port, _, banner = result
+                open_ports[port] = {"service": get_service_name(port), "banner": banner}
+
+    return open_ports
+
+
+def dns_lookup(target: str) -> dict:
+    result = {"hostname": target, "ips": [], "reverse": []}
+    try:
+        info = socket.getaddrinfo(target, None)
+        ips = list(set(i[4][0] for i in info))
+        result["ips"] = ips
+        for ip in ips[:3]:
+            try:
+                rev = socket.gethostbyaddr(ip)[0]
+                result["reverse"].append(rev)
+            except Exception:
+                pass
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def web_fingerprint_fallback(target: str, port: int = 80, ssl: bool = False) -> dict:
+    """Fallback web fingerprinting when GOD'S EYE is unavailable."""
+    import aiohttp
+    import ssl as ssl_lib
+
+    TECH_FINGERPRINTS = {
+        "WordPress": [r"wp-content", r"wp-includes", r"WordPress"],
+        "Joomla": [r"Joomla!", r"/components/com_"],
+        "Drupal": [r"Drupal", r"/sites/default/"],
+        "Laravel": [r"laravel_session", r"Laravel"],
+        "Django": [r"csrfmiddlewaretoken", r"django"],
+        "React": [r"react\.production\.min\.js", r"__NEXT_DATA__", r"data-reactroot"],
+        "Angular": [r"ng-version", r"angular\.min\.js"],
+        "Vue.js": [r"vue\.runtime", r"__vue__"],
+        "Apache": [r"Apache/", r"Server: Apache"],
+        "Nginx": [r"nginx/", r"Server: nginx"],
+        "IIS": [r"Microsoft-IIS", r"X-Powered-By: ASP.NET"],
+        "PHP": [r"X-Powered-By: PHP", r"PHPSESSID"],
+    }
+
+    WAF_SIGNATURES = {
+        "Cloudflare": ["cf-ray", "cloudflare", "__cfduid"],
+        "ModSecurity": ["mod_security", "NAXSI", "modsec"],
+        "Sucuri": ["sucuri", "x-sucuri-id"],
+        "Imperva": ["imperva", "incapsula", "visid_incap"],
+        "AWS WAF": ["awselb", "x-amzn-requestid"],
+        "Akamai": ["akamai", "ak_bmsc"],
+        "F5 BIG-IP": ["bigipserver", "f5_cspm"],
+        "Barracuda": ["barra_counter_session", "barracuda_"],
+    }
+
+    proto = "https" if ssl or port == 443 else "http"
+    url = f"{proto}://{target}:{port}" if port not in (80, 443) else f"{proto}://{target}"
+
+    result = {
+        "url": url, "status_code": None, "server": "", "technologies": [],
+        "waf": None, "headers": {}, "error": None,
+        "technologies_detailed": [], "waf_results": [], "cves": [], "vulns": [],
+    }
+
+    try:
+        ssl_ctx = ssl_lib.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl_lib.CERT_NONE
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        timeout = aiohttp.ClientTimeout(total=8)
+
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                result["status_code"] = resp.status
+                result["server"] = resp.headers.get("Server", "")
+                result["headers"] = dict(resp.headers)
+                body = await resp.text(errors="ignore")
+                all_content = body + str(resp.headers)
+
+                for tech, patterns in TECH_FINGERPRINTS.items():
+                    for pattern in patterns:
+                        if re.search(pattern, all_content, re.IGNORECASE):
+                            if tech not in result["technologies"]:
+                                result["technologies"].append(tech)
+                            break
+
+                headers_lower = {k.lower(): v.lower() for k, v in resp.headers.items()}
+                for waf, sigs in WAF_SIGNATURES.items():
+                    for sig in sigs:
+                        if any(sig in v for v in headers_lower.values()):
+                            result["waf"] = waf
+                            break
+                    if result["waf"]:
+                        break
+    except Exception as e:
+        result["error"] = str(e)[:100]
+
+    return result
+
+
+async def run_recon(state: EngagementState, console=None,
+                    stealth: bool = False, gods_eye_path: str = None) -> dict:
+    target = state.target
+
+    def log(msg):
+        if console:
+            console.print(f"  [dim]→[/dim] {msg}")
+
+    log(f"DNS lookup: {target}")
+    dns = dns_lookup(target)
+
+    port_list = STEALTH_PORTS if stealth else COMMON_PORTS
+    timeout = 3.0 if stealth else 1.0
+    log(f"Port scan ({len(port_list)} ports, stealth={stealth})...")
+    open_ports = await port_scan(target, port_list, timeout=timeout, stealth=stealth)
+
+    web_results = {}
+    for port, info in open_ports.items():
+        svc = info["service"]
+        if svc in ("HTTP", "HTTP-Alt", "HTTPS", "HTTPS-Alt"):
+            ssl = svc in ("HTTPS", "HTTPS-Alt")
+            proto = "https" if ssl else "http"
+            base_port = port
+            url = f"{proto}://{target}:{base_port}" if base_port not in (80, 443) else f"{proto}://{target}"
+
+            log(f"GOD'S EYE scan on {url}...")
+            try:
+                from modules.gods_eye_bridge import run_gods_eye_scan, gods_eye_to_recon_format
+                ge_result = await run_gods_eye_scan(url, gods_eye_path)
+                web_results[port] = gods_eye_to_recon_format(ge_result, port, ssl)
+                if ge_result.get("error"):
+                    log(f"  GOD'S EYE fallback: {ge_result['error']}")
+                    web_results[port] = await web_fingerprint_fallback(target, port, ssl)
+            except Exception as e:
+                log(f"  Fingerprint fallback ({e})")
+                web_results[port] = await web_fingerprint_fallback(target, port, ssl)
+
+    recon_data = {
+        "dns": dns,
+        "open_ports": open_ports,
+        "web": web_results,
+        "stealth": stealth,
+    }
+
+    state.recon_data = recon_data
+
+    # ── Generate findings ─────────────────────────────────────────────────────
+    risky = {
+        22: ("SSH", Severity.MEDIUM),
+        23: ("Telnet", Severity.HIGH),
+        445: ("SMB", Severity.MEDIUM),
+        3389: ("RDP", Severity.MEDIUM),
+        6379: ("Redis (no auth)", Severity.HIGH),
+        27017: ("MongoDB (no auth)", Severity.HIGH),
+        5900: ("VNC", Severity.HIGH),
+    }
+    for port, (svc, sev) in risky.items():
+        if port in open_ports:
+            f = Finding(
+                title=f"{svc} exposed on port {port}",
+                severity=sev,
+                description=f"{svc} service detected. May allow unauthorized access.",
+                evidence=f"Port {port} open, banner: {open_ports[port].get('banner', 'N/A')}",
+                mitre_tactic="Discovery",
+                mitre_technique="T1046 - Network Service Scanning",
+                remediation=f"Restrict {svc} access via firewall. Use VPN or IP allowlist.",
+                phase="recon",
+            )
+            if not any(x.title == f.title for x in state.findings):
+                state.add_finding(f)
+
+    def _add(finding):
+        if not any(x.title == finding.title for x in state.findings):
+            state.add_finding(finding)
+
+    for port, wdata in web_results.items():
+        if wdata.get("waf"):
+            _add(Finding(
+                title=f"WAF detected: {wdata['waf']} on port {port}",
+                severity=Severity.INFO,
+                description=f"{wdata['waf']} WAF protecting port {port}. Bypass attempts needed.",
+                evidence="WAF signatures found in response headers",
+                mitre_tactic="Defense Evasion",
+                mitre_technique="T1562 - Impair Defenses",
+                phase="recon",
+            ))
+
+        # GOD'S EYE CVE findings
+        for cve in wdata.get("cves", []):
+            if cve.get("cvss_score", 0) >= 7.0:
+                sev = Severity.CRITICAL if cve["cvss_score"] >= 9.0 else Severity.HIGH
+                _add(Finding(
+                    title=f"{cve['cve_id']}: {cve['technology']} vulnerability",
+                    severity=sev,
+                    description=cve["description"][:300],
+                    evidence=f"Detected version matches affected range: {cve['affected_versions']}",
+                    mitre_tactic="Initial Access",
+                    mitre_technique="T1190 - Exploit Public-Facing Application",
+                    remediation=f"Upgrade {cve['technology']} to version {cve['fixed_version']} or later.",
+                    cvss=cve["cvss_score"],
+                    phase="recon",
+                ))
+
+        # GOD'S EYE vuln findings
+        for vuln in wdata.get("vulns", []):
+            sev_map = {"CRITICAL": Severity.CRITICAL, "HIGH": Severity.HIGH,
+                       "MEDIUM": Severity.MEDIUM, "LOW": Severity.LOW, "INFO": Severity.INFO}
+            sev = sev_map.get(vuln.get("severity", "INFO"), Severity.INFO)
+            _add(Finding(
+                title=vuln["name"],
+                severity=sev,
+                description=vuln.get("evidence", "")[:300],
+                evidence=vuln.get("evidence", ""),
+                mitre_tactic="Discovery",
+                mitre_technique="T1083 - File and Directory Discovery",
+                remediation=vuln.get("recommendation", ""),
+                phase="recon",
+            ))
+
+    state.recon_data.update({"gods_eye_used": True})
+    state.add_note(f"Recon complete: {len(open_ports)} open ports, {len(web_results)} web services")
+    return recon_data
