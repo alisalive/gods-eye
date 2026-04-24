@@ -33,8 +33,8 @@ into a single CLI workflow.
 ### Windows
 
 ```bat
-git clone https://github.com/alisalive/ai-attack-orchestrator
-cd ai-attack-orchestrator
+git clone https://github.com/alisalive/gods-eye
+cd gods-eye
 setup.bat
 ```
 
@@ -48,8 +48,8 @@ playwright install chromium
 ### Kali Linux / Debian
 
 ```bash
-git clone https://github.com/alisalive/ai-attack-orchestrator
-cd ai-attack-orchestrator
+git clone https://github.com/alisalive/gods-eye
+cd gods-eye
 chmod +x setup.sh && ./setup.sh
 ```
 
