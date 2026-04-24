@@ -32,7 +32,7 @@ fi
 # Non-root: --user                   (installs to ~/.local, no sudo needed)
 echo "Installing Python dependencies..."
 if [ "$EUID" -eq 0 ]; then
-    pip3 install -r requirements.txt --break-system-packages
+    pip3 install -r requirements.txt --break-system-packages --ignore-installed
 else
     pip3 install -r requirements.txt --user
 fi
@@ -48,7 +48,7 @@ mkdir -p reports/screenshots logs config/wordlists
 # ── Editable install (godseye command) ────────────────────────────────────────
 echo "Installing as editable package (godseye command)..."
 if [ "$EUID" -eq 0 ]; then
-    pip3 install -e . --break-system-packages 2>/dev/null || \
+    pip3 install -e . --break-system-packages --ignore-installed 2>/dev/null || \
         echo "NOTE: pip install -e . failed — use python3 main.py directly"
 else
     pip3 install -e . --user 2>/dev/null || \
