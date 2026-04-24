@@ -84,18 +84,32 @@ async def _test_ftp(host: str, port: int, username: str, password: str, timeout:
 
 async def _test_http_basic(host: str, port: int, username: str, password: str,
                             timeout: float = 5.0) -> bool:
+    """Return True only when unauthenticated → 401/403 AND authenticated → 200.
+
+    If the unauthenticated request already returns 200, the endpoint does not
+    require authentication at all — skip as a false positive.
+    """
     try:
         import aiohttp
         import base64
         scheme = "https" if port in (443, 8443) else "http"
         url = f"{scheme}://{host}:{port}/"
-        creds = base64.b64encode(f"{username}:{password}".encode()).decode()
-        headers = {"Authorization": f"Basic {creds}"}
         timeout_obj = aiohttp.ClientTimeout(total=timeout)
         async with aiohttp.ClientSession(timeout=timeout_obj) as session:
-            async with session.get(url, headers=headers, ssl=False, allow_redirects=False) as resp:
-                # 200 or redirect away from login = success
-                return resp.status == 200
+            # Step 1: unauthenticated probe
+            async with session.get(url, ssl=False, allow_redirects=False) as unauth:
+                if unauth.status == 200:
+                    # Server returns 200 without credentials — not a real auth wall
+                    return False
+                if unauth.status not in (401, 403):
+                    # Unexpected status (redirect, 5xx…) — skip
+                    return False
+
+            # Step 2: authenticated attempt — only reached when unauth was 401/403
+            creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+            headers = {"Authorization": f"Basic {creds}"}
+            async with session.get(url, headers=headers, ssl=False, allow_redirects=False) as auth:
+                return auth.status == 200
     except Exception:
         return False
 
