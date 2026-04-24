@@ -65,7 +65,7 @@ godseye --target 10.0.0.1 --mode pentest
 ## Usage
 
 ```
-python main.py --target TARGET [OPTIONS]
+godseye --target TARGET [OPTIONS]
 ```
 
 ### All flags
@@ -92,27 +92,27 @@ python main.py --target TARGET [OPTIONS]
 
 ```bash
 # Basic pentest — no AI (default)
-python main.py --target 127.0.0.1 --mode pentest
+godseye --target 127.0.0.1 --mode pentest
 
 # With Claude AI analysis enabled
-python main.py --target 10.0.0.1 --mode pentest --ai --api-key sk-ant-...
+godseye --target 10.0.0.1 --mode pentest --ai --api-key sk-ant-...
 
 # Full red team engagement without AI
-python main.py --target 10.0.0.1 --mode redteam --stealth --subdomains --screenshot --dirbrute
+godseye --target 10.0.0.1 --mode redteam --stealth --subdomains --screenshot --dirbrute
 
 # Full red team engagement with AI
-python main.py --target 10.0.0.1 --mode redteam --stealth --subdomains --screenshot --dirbrute \
+godseye --target 10.0.0.1 --mode redteam --stealth --subdomains --screenshot --dirbrute \
                --ai --api-key sk-ant-...
 
 # With Shodan and PDF export
-python main.py --target 192.168.1.1 --mode pentest --shodan-key YOUR_KEY --pdf
+godseye --target 192.168.1.1 --mode pentest --shodan-key YOUR_KEY --pdf
 
 # With AI key from environment variable
 export ANTHROPIC_API_KEY=sk-ant-...
-python main.py --target example.com --mode pentest --ai --output ./my-reports
+godseye --target example.com --mode pentest --ai --output ./my-reports
 
 # Interactive with all modules
-python main.py --target 10.0.0.1 --mode redteam --stealth --subdomains --screenshot \
+godseye --target 10.0.0.1 --mode redteam --stealth --subdomains --screenshot \
                --dirbrute --pdf --interactive --ai --api-key sk-ant-...
 ```
 
