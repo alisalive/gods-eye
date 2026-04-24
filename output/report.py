@@ -506,7 +506,7 @@ def generate_html_report(state: EngagementState, ai_analysis: dict = None) -> st
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GODS EYE :: {_escape(state.target)}</title>
+<title>GOD'S EYE :: {_escape(state.target)}</title>
 <style>
 /* ── Reset & base ── */
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
@@ -696,7 +696,7 @@ body{{
 <div class="header">
   <div class="header-inner">
     <div>
-      <div class="header-label">GODS EYE v1.0.0 :: Threat Intelligence Report</div>
+      <div class="header-label">GOD'S EYE v1.0.0 :: Threat Intelligence Report</div>
       <div class="header-title">{_escape(mode_label)}</div>
       <div class="header-target">{_escape(state.target)}</div>
       <div class="header-meta">
@@ -801,7 +801,7 @@ body{{
 <!-- ═══ FOOTER ════════════════════════════════════════════════════════════ -->
 <div class="footer">
   <div class="footer-text">
-    <span class="footer-brand">GODS EYE v1.0.0 by alisalive</span>
+    <span class="footer-brand">GOD'S EYE v1.0.0 by alisalive</span>
     &nbsp;&middot;&nbsp;{generated_at}&nbsp;&middot;&nbsp;
     <span style='color:{C["muted"]}'>For authorized security testing only</span>
   </div>

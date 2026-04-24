@@ -1,4 +1,4 @@
-# DISCLAIMER — AI Attack Orchestrator
+# DISCLAIMER — GOD'S EYE
 
 ## Authorized Use Only
 
@@ -29,4 +29,4 @@ for remediation before public disclosure.
 
 ---
 
-*AI Attack Orchestrator v1.0.0 — by alisalive*
+*GOD'S EYE v1.0.0 — by alisalive*

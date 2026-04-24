@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# AI Attack Orchestrator — Kali Linux / Debian setup
+# GOD'S EYE — Kali Linux / Debian setup
 set -e
 
 echo "============================================"
-echo " AI Attack Orchestrator v1.0.0 - Setup"
+echo " GOD'S EYE v1.0.0 - Setup"
 echo " For authorized security testing only"
 echo "============================================"
 echo
@@ -37,6 +37,6 @@ echo " Setup complete!"
 echo "============================================"
 echo
 echo "Usage:"
-echo "  python3 main.py --target 127.0.0.1 --mode pentest --skip-ai"
+echo "  python3 main.py --target 127.0.0.1 --mode pentest"
 echo "  godseye --target TARGET --mode redteam --stealth --subdomains --screenshot"
 echo

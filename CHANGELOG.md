@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to AI Attack Orchestrator are documented here.
+All notable changes to GOD'S EYE are documented here.
 
 ---
 

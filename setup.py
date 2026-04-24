@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="ai-attack-orchestrator",
+    name="gods-eye",
     version="1.0.0",
-    description="AI-powered penetration testing and red team automation tool",
+    description="GOD'S EYE — AI-powered penetration testing and red team automation",
     author="alisalive",
     python_requires=">=3.11",
     packages=find_packages(),

@@ -1,8 +1,8 @@
-# AI Attack Orchestrator v1.0.0
+# GOD'S EYE v1.0.0
 
 An AI-powered penetration testing and red team automation tool built in Python.
-Combines GOD'S EYE scanning, Claude AI analysis, and modular attack phases into
-a single CLI workflow.
+Combines GOD'S EYE deep scanning, Claude AI analysis, and modular attack phases
+into a single CLI workflow.
 
 > **For authorized security testing only.**
 
@@ -188,4 +188,4 @@ See [DISCLAIMER.md](DISCLAIMER.md)
 
 ## Author
 
-**alisalive** — AI Attack Orchestrator v1.0.0
+**alisalive** — GOD'S EYE v1.0.0

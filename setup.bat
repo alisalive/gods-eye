@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo  AI Attack Orchestrator v1.0.0 - Setup
+echo  GOD'S EYE v1.0.0 - Setup
 echo  For authorized security testing only
 echo ============================================
 echo.
@@ -34,7 +34,7 @@ echo.
 echo Setup complete!
 echo.
 echo Usage:
-echo   python main.py --target 127.0.0.1 --mode pentest --skip-ai
+echo   python main.py --target 127.0.0.1 --mode pentest
 echo   python main.py --target TARGET --mode redteam --stealth --subdomains --screenshot --dirbrute
 echo   godseye --target TARGET --mode redteam --stealth --subdomains --screenshot
 echo.

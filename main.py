@@ -6,13 +6,13 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 """
-AI Attack Orchestrator v1.0.0 — Main CLI
+GOD'S EYE v1.0.0 — Main CLI
 For authorized security testing only.
 
 Usage:
-  python main.py --target 10.0.0.1 --mode pentest --skip-ai
+  python main.py --target 10.0.0.1 --mode pentest
   python main.py --target example.com --mode redteam --stealth --subdomains --screenshot
-  python main.py --target 192.168.1.1 --mode pentest --api-key sk-ant-... --output ./reports
+  python main.py --target 192.168.1.1 --mode pentest --ai --api-key sk-ant-... --output ./reports
 """
 
 import asyncio
@@ -50,7 +50,7 @@ BANNER = """
  ██║   ██║██║   ██║██║  ██║╚════██╗    ██╔══╝    ╚██╔╝  ██╔══╝
  ╚██████╔╝╚██████╔╝██████╔╝███████║    ███████╗   ██║   ███████╗
   ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝    ╚══════╝   ╚═╝   ╚══════╝
-[/bold green][dim]  AI Attack Orchestrator v1.0.0 -- by alisalive[/dim]
+[/bold green][dim]  GOD'S EYE v1.0.0 -- by alisalive[/dim]
 [red]  For authorized security testing only[/red]
 """
 
@@ -411,7 +411,7 @@ async def run_engagement(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AI Attack Orchestrator — AI-powered pentest/red team tool\nFor authorized security testing only.",
+        description="GOD'S EYE v1.0.0 — AI-powered penetration testing and red team automation\nFor authorized security testing only.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

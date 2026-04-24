@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-attack-orchestrator"
+name = "gods-eye"
 version = "1.0.0"
-description = "AI-powered penetration testing and red team automation tool"
+description = "GOD'S EYE — AI-powered penetration testing and red team automation"
 authors = [{name = "alisalive"}]
 requires-python = ">=3.11"
 dependencies = [
