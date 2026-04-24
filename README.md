@@ -47,6 +47,8 @@ playwright install chromium
 
 ### Kali Linux / Debian
 
+Tested on Kali Linux (root and non-root).
+
 ```bash
 git clone https://github.com/alisalive/gods-eye
 cd gods-eye
