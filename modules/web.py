@@ -348,7 +348,7 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                 # ── All other 200s — filter HTML false positives ───────────────
                 # Skip if HTML response with no binary extension clues
                 # (soft-404 / redirect page masquerading as 200)
-                if is_html and not (has_bin_ext and cl > 5000):
+                if is_html and not (has_bin_ext and body_len > 5000):
                     continue
 
                 # Real finding: non-HTML content-type OR binary ext + large body
