@@ -532,21 +532,23 @@ async def run_recon(state: EngagementState, console=None,
                              allow_redirects=True)
             hdrs_lc = {k.lower() for k in resp.headers}
             if "x-content-type-options" not in hdrs_lc:
-                # Header is genuinely absent — restore the finding
-                state.add_finding(Finding(
-                    title="X-Content-Type-Options missing",
-                    severity=Severity.MEDIUM,
-                    description=(
-                        "The X-Content-Type-Options: nosniff header is not set. "
-                        "Browsers may MIME-sniff responses away from the declared "
-                        "content-type, enabling drive-by download attacks."
-                    ),
-                    evidence=f"Header absent in live HEAD {check_url}",
-                    mitre_tactic="Defense Evasion",
-                    mitre_technique="T1562 - Impair Defenses",
-                    remediation="Add 'X-Content-Type-Options: nosniff' to all HTTP responses.",
-                    phase="recon",
-                ))
+                # Header is genuinely absent — restore the finding (once only)
+                _xcto_title = "X-Content-Type-Options missing"
+                if not any(f.title == _xcto_title for f in state.findings):
+                    state.add_finding(Finding(
+                        title=_xcto_title,
+                        severity=Severity.MEDIUM,
+                        description=(
+                            "The X-Content-Type-Options: nosniff header is not set. "
+                            "Browsers may MIME-sniff responses away from the declared "
+                            "content-type, enabling drive-by download attacks."
+                        ),
+                        evidence=f"Header absent in live HEAD {check_url}",
+                        mitre_tactic="Defense Evasion",
+                        mitre_technique="T1562 - Impair Defenses",
+                        remediation="Add 'X-Content-Type-Options: nosniff' to all HTTP responses.",
+                        phase="recon",
+                    ))
             verified_xcto_ports.add(p)
         except Exception:
             # Live check failed — restore original finding conservatively
@@ -555,6 +557,15 @@ async def run_recon(state: EngagementState, console=None,
                 if not any(f.title == original.title for f in state.findings):
                     state.add_finding(original)
             verified_xcto_ports.add(p)
+
+    # ── Global deduplication: keep only the first occurrence of each title ──────
+    seen_titles: set = set()
+    unique_findings = []
+    for f in state.findings:
+        if f.title not in seen_titles:
+            seen_titles.add(f.title)
+            unique_findings.append(f)
+    state.findings = unique_findings
 
     state.recon_data.update({"gods_eye_used": True})
     state.add_note(f"Recon complete: {len(open_ports)} open ports, {len(web_results)} web services")
