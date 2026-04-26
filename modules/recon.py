@@ -337,14 +337,22 @@ async def run_recon(state: EngagementState, console=None,
                 if redirects_to_https:
                     continue
 
-            # 2. "Open redirect" — skip when Location points to same domain or is relative
+            # 2. "Open redirect" — only flag when Location is an absolute URL
+            #    pointing to a host other than the target.
+            #    Relative paths (/foo), same-domain URLs, and missing Location
+            #    headers are all skipped as false positives.
             if "redirect" in vuln_name_lc:
                 loc_match = re.search(r'[Ll]ocation:\s*(\S+)', evidence)
                 if loc_match:
                     location = loc_match.group(1)
-                    # Only flag if absolute URL pointing to a *different* host
-                    if not location.startswith("http") or target in location:
+                    is_absolute = (location.startswith("http://") or
+                                   location.startswith("https://"))
+                    is_external = target not in location
+                    if not (is_absolute and is_external):
                         continue
+                else:
+                    # No Location value found in evidence — can't verify, skip
+                    continue
 
             # 3. "jQuery outdated" — skip when jQuery not actually present
             if "jquery" in vuln_name_lc:

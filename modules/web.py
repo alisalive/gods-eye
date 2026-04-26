@@ -116,7 +116,7 @@ CRITICAL_KEYWORDS = (".env", ".git", "backup", "db.sql")
 ADMIN_KEYWORDS: dict[str, list[str]] = {
     "/phpmyadmin":  ["phpmyadmin", "mysql", "pma"],
     "/console":     ["console", "rails", "groovy", "shell"],
-    "/h2-console":  ["h2", "java", "H2 Console"],
+    "/h2-console":  ["h2", "H2", "java", "H2 Console", "h2-console"],
     "/wp-admin":    ["wordpress", "wp-login", "WordPress"],
     "/actuator":    ["actuator", "{"],
     "/swagger":     ["swagger", "openapi", "Swagger"],
