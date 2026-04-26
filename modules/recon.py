@@ -112,6 +112,30 @@ def dns_lookup(target: str) -> dict:
     return result
 
 
+async def _check_https_redirect(target: str, port: int) -> bool:
+    """Return True if an HTTP request to this port receives a 301/302/307/308
+    redirect whose Location starts with 'https://'.  Used to suppress the
+    'HTTPS not used' false positive on sites that properly enforce HTTPS."""
+    import aiohttp
+    import ssl as ssl_lib
+    try:
+        url = f"http://{target}" if port == 80 else f"http://{target}:{port}"
+        ssl_ctx = ssl_lib.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl_lib.CERT_NONE
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=ssl_ctx),
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as session:
+            async with session.get(url, allow_redirects=False) as resp:
+                if resp.status in (301, 302, 307, 308):
+                    location = resp.headers.get("Location", "")
+                    return location.lower().startswith("https://")
+    except Exception:
+        pass
+    return False
+
+
 async def web_fingerprint_fallback(target: str, port: int = 80, ssl: bool = False) -> dict:
     """Fallback web fingerprinting when GOD'S EYE is unavailable."""
     import aiohttp
@@ -150,6 +174,7 @@ async def web_fingerprint_fallback(target: str, port: int = 80, ssl: bool = Fals
         "url": url, "status_code": None, "server": "", "technologies": [],
         "waf": None, "headers": {}, "error": None,
         "technologies_detailed": [], "waf_results": [], "cves": [], "vulns": [],
+        "_body": "",
     }
 
     try:
@@ -165,6 +190,7 @@ async def web_fingerprint_fallback(target: str, port: int = 80, ssl: bool = Fals
                 result["server"] = resp.headers.get("Server", "")
                 result["headers"] = dict(resp.headers)
                 body = await resp.text(errors="ignore")
+                result["_body"] = body
                 all_content = body + str(resp.headers)
 
                 for tech, patterns in TECH_FINGERPRINTS.items():
@@ -264,6 +290,12 @@ async def run_recon(state: EngagementState, console=None,
             state.add_finding(finding)
 
     for port, wdata in web_results.items():
+        # Pre-compute HTTPS-redirect flag for HTTP ports (filter false positives)
+        _svc_is_http = wdata.get("url", "").startswith("http://")
+        redirects_to_https = False
+        if _svc_is_http:
+            redirects_to_https = await _check_https_redirect(target, port)
+
         if wdata.get("waf"):
             _add(Finding(
                 title=f"WAF detected: {wdata['waf']} on port {port}",
@@ -293,14 +325,49 @@ async def run_recon(state: EngagementState, console=None,
 
         # GOD'S EYE vuln findings
         for vuln in wdata.get("vulns", []):
+            vuln_name    = vuln.get("name", "")
+            evidence     = vuln.get("evidence", "")
+            vuln_name_lc = vuln_name.lower()
+            server_hdr   = wdata.get("server", "")
+            body_text    = wdata.get("_body", "")
+            technologies = wdata.get("technologies", [])
+
+            # 1. "HTTPS not used" — skip when site properly redirects HTTP → HTTPS
+            if "https" in vuln_name_lc and "not" in vuln_name_lc:
+                if redirects_to_https:
+                    continue
+
+            # 2. "Open redirect" — skip when Location points to same domain or is relative
+            if "redirect" in vuln_name_lc:
+                loc_match = re.search(r'[Ll]ocation:\s*(\S+)', evidence)
+                if loc_match:
+                    location = loc_match.group(1)
+                    # Only flag if absolute URL pointing to a *different* host
+                    if not location.startswith("http") or target in location:
+                        continue
+
+            # 3. "jQuery outdated" — skip when jQuery not actually present
+            if "jquery" in vuln_name_lc:
+                jquery_present = (
+                    any("jquery" in t.lower() for t in technologies)
+                    or "jquery" in body_text.lower()
+                )
+                if not jquery_present:
+                    continue
+
+            # 4. "Server version disclosed" — skip when Server header has no version number
+            if "server" in vuln_name_lc and "version" in vuln_name_lc:
+                if not re.search(r'\w+/\d+[\d.]+', server_hdr):
+                    continue
+
             sev_map = {"CRITICAL": Severity.CRITICAL, "HIGH": Severity.HIGH,
                        "MEDIUM": Severity.MEDIUM, "LOW": Severity.LOW, "INFO": Severity.INFO}
             sev = sev_map.get(vuln.get("severity", "INFO"), Severity.INFO)
             _add(Finding(
-                title=vuln["name"],
+                title=vuln_name,
                 severity=sev,
-                description=vuln.get("evidence", "")[:300],
-                evidence=vuln.get("evidence", ""),
+                description=evidence[:300],
+                evidence=evidence,
                 mitre_tactic="Discovery",
                 mitre_technique="T1083 - File and Directory Discovery",
                 remediation=vuln.get("recommendation", ""),
