@@ -137,18 +137,43 @@ async def _fetch_response_headers(url: str) -> dict:
         return {}
 
 
+def _sync_check_redirect(url: str) -> bool:
+    """Synchronous fallback redirect check using the requests library.
+
+    Used when the aiohttp probe returns a non-redirect (e.g. Cloudflare
+    serves a 200 challenge page to aiohttp but a proper 301 to requests).
+    Returns True on any exception — benefit of the doubt, suppress finding.
+    """
+    try:
+        import requests as req_lib
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        r = req_lib.get(url, allow_redirects=False, timeout=10, verify=False)
+        if r.status_code in (301, 302, 307, 308):
+            loc = r.headers.get("Location", "")
+            return loc.lower().startswith("https://")
+    except Exception:
+        return True  # can't confirm — assume redirect, suppress finding
+    return False
+
+
 async def _check_https_redirect(target: str, port: int) -> bool:
     """Return True if an HTTP request to this port receives a 301/302/307/308
     redirect whose Location starts with 'https://'.  Used to suppress the
     'HTTPS not used' false positive on sites that properly enforce HTTPS.
 
-    Returns True on any exception so that network errors (Cloudflare, CDN
-    TLS intercept, connection reset) suppress the finding rather than surface
-    it as a false positive.
+    Strategy:
+    1. aiohttp probe  — fast async check, ssl=False to avoid TLS handshake noise
+    2. requests fallback (thread executor) — Cloudflare and some CDNs return a
+       200 challenge page to aiohttp but issue a proper 301 to a stock UA;
+       the synchronous probe uses a different TLS stack and User-Agent.
+
+    Returns True on any unrecoverable exception so network errors suppress
+    the finding rather than surface it as a false positive.
     """
     import aiohttp
+    url = f"http://{target}" if port == 80 else f"http://{target}:{port}"
     try:
-        url = f"http://{target}" if port == 80 else f"http://{target}:{port}"
         async with aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(ssl=False),
             timeout=aiohttp.ClientTimeout(total=10),
@@ -157,9 +182,16 @@ async def _check_https_redirect(target: str, port: int) -> bool:
                 if resp.status in (301, 302, 307, 308):
                     location = resp.headers.get("Location", "")
                     return location.lower().startswith("https://")
+                # Non-redirect from aiohttp — try requests fallback
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, _sync_check_redirect, url)
     except Exception:
-        return True  # can't confirm HTTP — assume redirect is in place, skip finding
-    return False
+        # aiohttp failed entirely — try requests fallback before giving up
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, _sync_check_redirect, url)
+        except Exception:
+            return True  # both probes failed — suppress finding
 
 
 async def web_fingerprint_fallback(target: str, port: int = 80, ssl: bool = False) -> dict:
