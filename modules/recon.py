@@ -475,6 +475,85 @@ async def run_recon(state: EngagementState, console=None,
                 phase="recon",
             ))
 
+    # ── Post-processing false-positive filter ────────────────────────────────
+    # Applied after all vuln-loop processing so runtime checks that may have
+    # failed silently earlier get one guaranteed last chance.
+
+    import requests as _req
+    import urllib3 as _urllib3
+    _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+
+    https_ports_open = [p for p in web_results.keys() if p in (443, 8443)]
+
+    # Collect XCTO findings so we can re-verify each affected port live.
+    xcto_by_port: dict = {}   # port → Finding (last one wins per port)
+
+    findings_to_remove = []
+    for f in state.findings:
+        title_lc = f.title.lower()
+
+        # "HTTPS not used" — meaningless when the same host has 443/8443 open
+        if "https" in title_lc and "not" in title_lc and "used" in title_lc:
+            if https_ports_open:
+                findings_to_remove.append(f)
+            continue
+
+        # "X-Content-Type-Options missing" — remove now, re-add only if confirmed
+        if "x-content-type-options" in title_lc:
+            # Match the finding back to a port so we verify the right URL
+            for p, wdata in web_results.items():
+                if str(p) in f.title or p in (
+                    int(x) for x in str(f.title).split() if x.isdigit()
+                ) or True:  # check all web ports if we can't isolate
+                    xcto_by_port[p] = f
+                    break
+            findings_to_remove.append(f)
+
+    for f in findings_to_remove:
+        try:
+            state.findings.remove(f)
+        except ValueError:
+            pass
+
+    # Re-verify X-Content-Type-Options with a live requests.head() call
+    verified_xcto_ports: set = set()
+    for p, wdata in web_results.items():
+        if p in verified_xcto_ports:
+            continue
+        url = wdata.get("url", "")
+        if not url:
+            continue
+        # Prefer HTTPS URL for the live check
+        check_url = url if url.startswith("https://") else f"https://{target}"
+        try:
+            resp = _req.head(check_url, verify=False, timeout=5,
+                             allow_redirects=True)
+            hdrs_lc = {k.lower() for k in resp.headers}
+            if "x-content-type-options" not in hdrs_lc:
+                # Header is genuinely absent — restore the finding
+                state.add_finding(Finding(
+                    title="X-Content-Type-Options missing",
+                    severity=Severity.MEDIUM,
+                    description=(
+                        "The X-Content-Type-Options: nosniff header is not set. "
+                        "Browsers may MIME-sniff responses away from the declared "
+                        "content-type, enabling drive-by download attacks."
+                    ),
+                    evidence=f"Header absent in live HEAD {check_url}",
+                    mitre_tactic="Defense Evasion",
+                    mitre_technique="T1562 - Impair Defenses",
+                    remediation="Add 'X-Content-Type-Options: nosniff' to all HTTP responses.",
+                    phase="recon",
+                ))
+            verified_xcto_ports.add(p)
+        except Exception:
+            # Live check failed — restore original finding conservatively
+            if p in xcto_by_port:
+                original = xcto_by_port[p]
+                if not any(f.title == original.title for f in state.findings):
+                    state.add_finding(original)
+            verified_xcto_ports.add(p)
+
     state.recon_data.update({"gods_eye_used": True})
     state.add_note(f"Recon complete: {len(open_ports)} open ports, {len(web_results)} web services")
     return recon_data
