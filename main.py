@@ -189,6 +189,7 @@ async def run_engagement(
     shodan_key: str = None,
     enable_dirbrute: bool = False,
     enable_pdf: bool = False,
+    enable_real_ip: bool = False,
 ):
     print_banner()
     config = load_config(config_path)
@@ -240,7 +241,27 @@ async def run_engagement(
             t.add_row(str(port), info["service"], (info.get("banner", "") or "—")[:50])
         console.print(t)
 
-    # ── Phase 1b: Shodan enrichment ───────────────────────────────────────────
+    # ── Phase 1b: Real IP discovery ───────────────────────────────────────────
+    if enable_real_ip:
+        print_phase_header("Phase 1b — Real IP Discovery", "◆")
+        with console.status("[cyan]Discovering real IP behind CDN/WAF...[/cyan]", spinner="dots"):
+            from modules.real_ip import run_real_ip_discovery
+            real_ips = await run_real_ip_discovery(target, console)
+        state.recon_data["real_ips"] = real_ips
+        if real_ips:
+            for entry in real_ips:
+                console.print(
+                    f"  [green]✓[/green] Potential real IP found: "
+                    f"[bold cyan]{entry['ip']}[/bold cyan] "
+                    f"(via [yellow]{entry['method']}[/yellow], "
+                    f"[dim]{entry['confidence']} confidence[/dim])"
+                )
+        else:
+            console.print("  [dim]→ No non-CDN IPs discovered[/dim]")
+        if stealth:
+            await stealth_delay(config)
+
+    # ── Phase 1c: Shodan enrichment ───────────────────────────────────────────
     if shodan_key:
         with console.status("[cyan]Querying Shodan...[/cyan]", spinner="dots"):
             from modules.shodan_recon import run_shodan_recon
@@ -436,6 +457,8 @@ Examples:
     parser.add_argument("--shodan-key", default=None, help="Shodan API key for host enrichment")
     parser.add_argument("--dirbrute", action="store_true", help="Enable directory brute-force")
     parser.add_argument("--pdf", action="store_true", help="Export report as PDF")
+    parser.add_argument("--real-ip", dest="real_ip", action="store_true",
+                        help="Attempt to discover the real IP behind CDN/WAF")
 
     args = parser.parse_args()
 
@@ -466,6 +489,7 @@ Examples:
             shodan_key=shodan_key,
             enable_dirbrute=args.dirbrute,
             enable_pdf=args.pdf,
+            enable_real_ip=args.real_ip,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user[/yellow]")

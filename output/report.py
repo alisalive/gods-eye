@@ -114,6 +114,42 @@ def _cve_table_section(cve_data: dict) -> str:
     </div>"""
 
 
+def _real_ip_section(real_ips: list) -> str:
+    if not real_ips:
+        return ""
+    conf_color = {"high": C["critical"], "medium": C["medium"], "low": C["low"]}
+    rows = ""
+    for entry in real_ips:
+        ip     = _escape(entry.get("ip", ""))
+        method = _escape(entry.get("method", ""))
+        conf   = entry.get("confidence", "low")
+        color  = conf_color.get(conf, C["info"])
+        rows += f"""
+        <tr class='trow'>
+          <td style='font-family:monospace;font-weight:700;color:{C["green"]}'>{ip}</td>
+          <td style='font-family:monospace;font-size:12px;color:{C["cyan"]}'>{method}</td>
+          <td><span style='font-family:monospace;font-size:10px;font-weight:700;
+                           text-transform:uppercase;padding:3px 8px;border-radius:3px;
+                           background:{color}22;color:{color};border:1px solid {color}55;
+                           letter-spacing:1px'>{conf}</span></td>
+        </tr>"""
+    return f"""
+    <div class='section'>
+      <h2 class='section-title'>&#x25b6; Real IP Discovery
+        <span class='count-badge'>{len(real_ips)}</span>
+      </h2>
+      <p style='font-size:12px;color:{C["muted"]};font-family:monospace;margin-bottom:14px'>
+        // Potential origin IPs discovered behind CDN / WAF layer
+      </p>
+      <div style='overflow-x:auto'>
+        <table class='data-table'>
+          <thead><tr><th>IP Address</th><th>Discovery Method</th><th>Confidence</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </div>"""
+
+
 def _opsec_timeline_section(opsec_data: dict, mode: str) -> str:
     if mode != "redteam" or not opsec_data:
         return ""
@@ -369,7 +405,7 @@ def generate_html_report(state: EngagementState, ai_analysis: dict = None) -> st
           {plan_items}
         </div>"""
 
-    # ── Screenshots / CVE / OPSEC / Kill chain ────────────────────────────────
+    # ── Screenshots / CVE / OPSEC / Kill chain / Real IP ─────────────────────
     screenshots    = state.recon_data.get("screenshots", {})
     screenshot_html = _screenshot_section(screenshots)
     cve_data        = getattr(state, "cve_data", {})
@@ -377,6 +413,7 @@ def generate_html_report(state: EngagementState, ai_analysis: dict = None) -> st
     opsec_data      = getattr(state, "opsec_tracker_data", {})
     opsec_html      = _opsec_timeline_section(opsec_data, state.mode.value)
     kill_chain_html = _kill_chain_section(state)
+    real_ip_html    = _real_ip_section(state.recon_data.get("real_ips", []))
 
     # ── Stat bars (CSS animated) ──────────────────────────────────────────────
     def stat_bar(label, count, color, delay_ms=0):
@@ -761,6 +798,8 @@ body{{
   {kill_chain_html}
 
   {screenshot_html}
+
+  {real_ip_html}
 
   {subdomain_html}
 
