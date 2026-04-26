@@ -362,6 +362,14 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
 
                 # ── Admin paths — baseline-aware soft-404 filtering ────────────
                 if path.startswith(ADMIN_PATH_PREFIXES):
+                    body_text = ep.get("body_text", "").lower()
+
+                    # Debug: log body preview for /h2-console so we can see
+                    # what the server actually returns for this path.
+                    if path.startswith("/h2-console"):
+                        log(f"[debug /h2-console] body={body_len}B "
+                            f"ct={ct!r} preview={body_text[:500]!r}")
+
                     if is_html:
                         # Compare body size against the canary-path baseline.
                         # < 1000-byte difference → server returns the same HTML
@@ -373,16 +381,24 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                         # skip if sizes match closely.
                         if homepage_size >= 0 and abs(body_len - homepage_size) < 1000:
                             continue
-                        # Keyword verification — only fire if the body actually
-                        # looks like the expected admin panel, not a generic page.
-                        body_text = ep.get("body_text", "").lower()
-                        _kw_match = True
-                        for kw_prefix, kw_list in ADMIN_KEYWORDS.items():
-                            if path.startswith(kw_prefix):
-                                _kw_match = any(kw.lower() in body_text for kw in kw_list)
-                                break
-                        if not _kw_match:
-                            continue
+
+                    # Keyword verification — applies to BOTH html and non-html
+                    # responses so the non-html else branch can't bypass it.
+                    # Also guards against stub/empty responses.
+                    _kw_match = True
+                    for kw_prefix, kw_list in ADMIN_KEYWORDS.items():
+                        if path.startswith(kw_prefix):
+                            if body_len < 500:
+                                # Tiny body → catch-all stub, not a real panel
+                                _kw_match = False
+                            elif not any(kw.lower() in body_text for kw in kw_list):
+                                # No expected keywords → generic catch-all page
+                                _kw_match = False
+                            break
+                    if not _kw_match:
+                        continue
+
+                    if is_html:
                         sev  = Severity.MEDIUM
                         desc = (f"Admin panel returning distinct HTML content "
                                 f"(likely a real login page): {ep['url']}")
