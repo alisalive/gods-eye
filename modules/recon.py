@@ -333,20 +333,29 @@ async def run_recon(state: EngagementState, console=None,
             body_text    = wdata.get("_body", "")
             technologies = wdata.get("technologies", [])
 
-            # 1. "HTTPS not used"
-            #    • HTTPS ports (443, 8443): HTTPS is already in use → always skip
-            #    • HTTP ports (80, 8080): skip only when the site redirects to HTTPS
-            #    • Any other port: leave the finding in place
-            if "https" in vuln_name_lc and "not" in vuln_name_lc:
-                if port in (443, 8443):
+            # ── False-positive guards ─────────────────────────────────────────
+
+            # 1. "HTTPS not used / missing / not enforced / HTTP only"
+            #    Match any vuln whose name suggests HTTPS is absent.
+            #    • URL already https:// OR port is 443/8443 → skip unconditionally
+            #    • HTTP port that redirects → HTTPS → skip
+            #    • Any other HTTP port where redirect check failed → skip
+            #      (redirect check returns True on exception → benefit of doubt)
+            _is_https_vuln = (
+                "https" in vuln_name_lc
+                and any(w in vuln_name_lc for w in ("not", "miss", "no ", "lack", "without", "enforc"))
+            ) or "http only" in vuln_name_lc
+            if _is_https_vuln:
+                _url_is_https = wdata.get("url", "").startswith("https://")
+                if _url_is_https or port in (443, 8443):
                     continue
-                if port in (80, 8080) and redirects_to_https:
+                if redirects_to_https:   # True for HTTP ports that redirect, or on exception
                     continue
 
             # 2. "Open redirect" — only flag when Location is an absolute URL
-            #    pointing to a host other than the target.
+            #    pointing to a host OTHER than the target.
             #    Relative paths (/foo), same-domain URLs, and missing Location
-            #    headers are all skipped as false positives.
+            #    are all skipped.
             if "redirect" in vuln_name_lc:
                 loc_match = re.search(r'[Ll]ocation:\s*(\S+)', evidence)
                 if loc_match:
@@ -357,10 +366,10 @@ async def run_recon(state: EngagementState, console=None,
                     if not (is_absolute and is_external):
                         continue
                 else:
-                    # No Location value found in evidence — can't verify, skip
+                    # No Location in evidence — can't verify, skip
                     continue
 
-            # 3. "jQuery outdated" — skip when jQuery not actually present
+            # 3. "jQuery outdated / vulnerable" — skip when jQuery not on the page
             if "jquery" in vuln_name_lc:
                 jquery_present = (
                     any("jquery" in t.lower() for t in technologies)
@@ -369,15 +378,22 @@ async def run_recon(state: EngagementState, console=None,
                 if not jquery_present:
                     continue
 
-            # 4. "Server version disclosed" — skip when Server header has no version number
-            if "server" in vuln_name_lc and "version" in vuln_name_lc:
+            # 4. "Server version disclosed / banner" — skip when Server header
+            #    contains only a product name with no version number.
+            if "server" in vuln_name_lc and any(w in vuln_name_lc for w in ("version", "banner", "disclos")):
                 if not re.search(r'\w+/\d+[\d.]+', server_hdr):
                     continue
 
-            # 5. "X-Content-Type-Options missing" — skip when header is present
+            # 5. "X-Content-Type-Options missing / not set"
+            #    Primary check: case-insensitive header lookup in wdata["headers"].
+            #    Fallback: if "nosniff" appears in the evidence the header IS set —
+            #    some scanner backends embed the header value rather than storing
+            #    it in the headers dict.
             if "x-content-type-options" in vuln_name_lc:
-                resp_headers = {k.lower(): v for k, v in wdata.get("headers", {}).items()}
-                if "x-content-type-options" in resp_headers:
+                _resp_hdrs_lc = {k.lower() for k in wdata.get("headers", {}).keys()}
+                _xcto_in_hdrs = "x-content-type-options" in _resp_hdrs_lc
+                _xcto_in_evidence = "nosniff" in evidence.lower()
+                if _xcto_in_hdrs or _xcto_in_evidence:
                     continue
 
             sev_map = {"CRITICAL": Severity.CRITICAL, "HIGH": Severity.HIGH,
