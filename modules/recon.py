@@ -119,7 +119,7 @@ async def _fetch_response_headers(url: str) -> dict:
     populate that field, so that header-presence vuln filters work correctly.
     Returns an empty dict on any failure — callers treat that as 'unknown'.
     """
-    if not url:
+    if not url or not isinstance(url, str):
         return {}
     import aiohttp
     import ssl as ssl_lib
@@ -391,12 +391,12 @@ async def run_recon(state: EngagementState, console=None,
 
         # GOD'S EYE vuln findings
         for vuln in wdata.get("vulns", []):
-            vuln_name    = vuln.get("name", "")
-            evidence     = vuln.get("evidence", "")
+            vuln_name    = vuln.get("name") or ""
+            evidence     = vuln.get("evidence") or ""
             vuln_name_lc = vuln_name.lower()
-            server_hdr   = wdata.get("server", "")
-            body_text    = wdata.get("_body", "")
-            technologies = wdata.get("technologies", [])
+            server_hdr   = wdata.get("server") or ""
+            body_text    = wdata.get("_body") or ""
+            technologies = wdata.get("technologies") or []
 
             # ── False-positive guards ─────────────────────────────────────────
 
@@ -490,6 +490,8 @@ async def run_recon(state: EngagementState, console=None,
 
     findings_to_remove = []
     for f in state.findings:
+        if not f.title:
+            continue
         title_lc = f.title.lower()
 
         # "HTTPS not used" — meaningless when the same host has 443/8443 open
