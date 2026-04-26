@@ -115,24 +115,25 @@ def dns_lookup(target: str) -> dict:
 async def _check_https_redirect(target: str, port: int) -> bool:
     """Return True if an HTTP request to this port receives a 301/302/307/308
     redirect whose Location starts with 'https://'.  Used to suppress the
-    'HTTPS not used' false positive on sites that properly enforce HTTPS."""
+    'HTTPS not used' false positive on sites that properly enforce HTTPS.
+
+    Returns True on any exception so that network errors (Cloudflare, CDN
+    TLS intercept, connection reset) suppress the finding rather than surface
+    it as a false positive.
+    """
     import aiohttp
-    import ssl as ssl_lib
     try:
         url = f"http://{target}" if port == 80 else f"http://{target}:{port}"
-        ssl_ctx = ssl_lib.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl_lib.CERT_NONE
         async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=ssl_ctx),
-            timeout=aiohttp.ClientTimeout(total=5),
+            connector=aiohttp.TCPConnector(ssl=False),
+            timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
             async with session.get(url, allow_redirects=False) as resp:
                 if resp.status in (301, 302, 307, 308):
                     location = resp.headers.get("Location", "")
                     return location.lower().startswith("https://")
     except Exception:
-        pass
+        return True  # can't confirm HTTP — assume redirect is in place, skip finding
     return False
 
 
@@ -366,6 +367,12 @@ async def run_recon(state: EngagementState, console=None,
             # 4. "Server version disclosed" — skip when Server header has no version number
             if "server" in vuln_name_lc and "version" in vuln_name_lc:
                 if not re.search(r'\w+/\d+[\d.]+', server_hdr):
+                    continue
+
+            # 5. "X-Content-Type-Options missing" — skip when header is present
+            if "x-content-type-options" in vuln_name_lc:
+                resp_headers = {k.lower(): v for k, v in wdata.get("headers", {}).items()}
+                if "x-content-type-options" in resp_headers:
                     continue
 
             sev_map = {"CRITICAL": Severity.CRITICAL, "HIGH": Severity.HIGH,
