@@ -178,14 +178,20 @@ async def get_baseline_body_size(session, base_url: str) -> int:
         return -1  # baseline unavailable — skip comparison
 
 
-async def get_homepage_body_size(session, base_url: str) -> int:
+async def get_homepage_body_size(session, base_url: str,
+                                 console=None) -> int:
     """Fetch the homepage (GET /) to establish a content baseline.
 
-    Returns the actual body byte count, or -1 if the request fails.
+    Returns the actual body byte count, or -1 if both probes fail.
     Catches SPAs and catch-all proxies that serve the same HTML for every URL —
     these may differ from the canary baseline but still match the homepage body.
+
+    Falls back to the requests library when aiohttp fails (SSL negotiation
+    differences, redirect handling quirks, etc.).
     """
     homepage_url = base_url.rstrip("/") + "/"
+
+    # ── Primary: aiohttp (shares the existing session / connector) ────────────
     try:
         async with session.get(
             homepage_url,
@@ -194,8 +200,24 @@ async def get_homepage_body_size(session, base_url: str) -> int:
         ) as resp:
             body = await resp.content.read(512 * 1024)
             return len(body)
-    except Exception:
-        return -1  # baseline unavailable — skip comparison
+    except Exception as e:
+        if console:
+            console.print(f"  [dim]→[/dim] [yellow]homepage baseline aiohttp failed "
+                          f"({base_url}): {e!s:.80} — trying requests fallback[/yellow]")
+
+    # ── Fallback: requests (sync, different TLS stack / User-Agent) ───────────
+    try:
+        import requests as req_lib
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        r = req_lib.get(homepage_url, verify=False, timeout=10,
+                        allow_redirects=True)
+        return len(r.content)
+    except Exception as e2:
+        if console:
+            console.print(f"  [dim]→[/dim] [yellow]homepage baseline requests fallback "
+                          f"also failed ({base_url}): {e2!s:.80}[/yellow]")
+        return -1  # both probes failed — baseline unavailable, skip comparison
 
 
 async def check_security_headers(session, url: str) -> dict:
@@ -352,7 +374,7 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
             # Soft-404 baseline — one canary request per host
             log(f"Fetching soft-404 baseline for {base_url}...")
             baseline_size  = await get_baseline_body_size(session, base_url)
-            homepage_size  = await get_homepage_body_size(session, base_url)
+            homepage_size  = await get_homepage_body_size(session, base_url, console)
 
             # Endpoint enumeration
             log(f"Endpoint enumeration ({len(SENSITIVE_ENDPOINTS)} paths)...")
