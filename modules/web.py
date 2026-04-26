@@ -364,12 +364,6 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                 if path.startswith(ADMIN_PATH_PREFIXES):
                     body_text = ep.get("body_text", "").lower()
 
-                    # Debug: log body preview for /h2-console so we can see
-                    # what the server actually returns for this path.
-                    if path.startswith("/h2-console"):
-                        log(f"[debug /h2-console] body={body_len}B "
-                            f"ct={ct!r} preview={body_text[:500]!r}")
-
                     if is_html:
                         # Compare body size against the canary-path baseline.
                         # < 1000-byte difference → server returns the same HTML
@@ -378,8 +372,10 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                             continue
                         # Compare against homepage body — SPAs and catch-all
                         # proxies serve the same shell HTML for every route;
-                        # skip if sizes match closely.
-                        if homepage_size >= 0 and abs(body_len - homepage_size) < 1000:
+                        # 5000-byte window used here (wider than the sensitive-
+                        # endpoint check) because large dynamic pages can vary
+                        # by several KB between requests.
+                        if homepage_size >= 0 and abs(body_len - homepage_size) < 5000:
                             continue
 
                     # Keyword verification — applies to BOTH html and non-html
