@@ -333,9 +333,14 @@ async def run_recon(state: EngagementState, console=None,
             body_text    = wdata.get("_body", "")
             technologies = wdata.get("technologies", [])
 
-            # 1. "HTTPS not used" — skip when site properly redirects HTTP → HTTPS
+            # 1. "HTTPS not used"
+            #    • HTTPS ports (443, 8443): HTTPS is already in use → always skip
+            #    • HTTP ports (80, 8080): skip only when the site redirects to HTTPS
+            #    • Any other port: leave the finding in place
             if "https" in vuln_name_lc and "not" in vuln_name_lc:
-                if redirects_to_https:
+                if port in (443, 8443):
+                    continue
+                if port in (80, 8080) and redirects_to_https:
                     continue
 
             # 2. "Open redirect" — only flag when Location is an absolute URL
