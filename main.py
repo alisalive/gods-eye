@@ -244,20 +244,17 @@ async def run_engagement(
     # ── Phase 1b: Real IP discovery ───────────────────────────────────────────
     if enable_real_ip:
         print_phase_header("Phase 1b — Real IP Discovery", "◆")
-        with console.status("[cyan]Discovering real IP behind CDN/WAF...[/cyan]", spinner="dots"):
-            from modules.real_ip import run_real_ip_discovery
-            real_ips = await run_real_ip_discovery(target, console)
+        # Module logs per-result progress; don't wrap in console.status()
+        from modules.real_ip import run_real_ip_discovery
+        real_ips = await run_real_ip_discovery(target, console)
         state.recon_data["real_ips"] = real_ips
         if real_ips:
-            for entry in real_ips:
-                console.print(
-                    f"  [green]✓[/green] Potential real IP found: "
-                    f"[bold cyan]{entry['ip']}[/bold cyan] "
-                    f"(via [yellow]{entry['method']}[/yellow], "
-                    f"[dim]{entry['confidence']} confidence[/dim])"
-                )
-        else:
-            console.print("  [dim]→ No non-CDN IPs discovered[/dim]")
+            confirmed = sum(1 for e in real_ips if e.get("confidence") == "confirmed")
+            console.print(
+                f"  [green]✓[/green] Real IP discovery: "
+                f"[bold]{len(real_ips)}[/bold] candidate(s) found"
+                + (f", [bold green]{confirmed} confirmed[/bold green]" if confirmed else "")
+            )
         if stealth:
             await stealth_delay(config)
 

@@ -117,33 +117,57 @@ def _cve_table_section(cve_data: dict) -> str:
 def _real_ip_section(real_ips: list) -> str:
     if not real_ips:
         return ""
-    conf_color = {"high": C["critical"], "medium": C["medium"], "low": C["low"]}
+    conf_color = {
+        "confirmed": C["green"],
+        "high":      C["critical"],
+        "medium":    C["medium"],
+        "low":       C["low"],
+    }
     rows = ""
     for entry in real_ips:
-        ip     = _escape(entry.get("ip", ""))
-        method = _escape(entry.get("method", ""))
-        conf   = entry.get("confidence", "low")
-        color  = conf_color.get(conf, C["info"])
+        ip        = _escape(entry.get("ip", ""))
+        method    = _escape(entry.get("method", ""))
+        conf      = entry.get("confidence", "low")
+        country   = _escape(entry.get("country", ""))
+        last_seen = _escape(entry.get("last_seen", ""))
+        verified  = entry.get("verified", False)
+        color     = conf_color.get(conf, C["info"])
+        verified_badge = (
+            f"<span style='font-family:monospace;font-size:10px;padding:2px 6px;"
+            f"border-radius:3px;background:{C['green']}22;color:{C['green']};"
+            f"border:1px solid {C['green']}44;margin-left:6px'>&#x2714; verified</span>"
+        ) if verified else ""
         rows += f"""
         <tr class='trow'>
-          <td style='font-family:monospace;font-weight:700;color:{C["green"]}'>{ip}</td>
+          <td style='font-family:monospace;font-weight:700;color:{C["green"]}'>{ip}{verified_badge}</td>
           <td style='font-family:monospace;font-size:12px;color:{C["cyan"]}'>{method}</td>
           <td><span style='font-family:monospace;font-size:10px;font-weight:700;
                            text-transform:uppercase;padding:3px 8px;border-radius:3px;
                            background:{color}22;color:{color};border:1px solid {color}55;
                            letter-spacing:1px'>{conf}</span></td>
+          <td style='font-size:12px;color:{C["muted"]}'>{country}</td>
+          <td style='font-family:monospace;font-size:11px;color:{C["muted"]}'>{last_seen}</td>
         </tr>"""
+    confirmed_count = sum(1 for e in real_ips if e.get("confidence") == "confirmed")
+    badge_extra = (
+        f"<span style='font-family:monospace;font-size:10px;padding:1px 7px;border-radius:10px;"
+        f"background:{C['green']}22;color:{C['green']};border:1px solid {C['green']}44;"
+        f"margin-left:8px'>{confirmed_count} confirmed</span>"
+    ) if confirmed_count else ""
     return f"""
     <div class='section'>
       <h2 class='section-title'>&#x25b6; Real IP Discovery
-        <span class='count-badge'>{len(real_ips)}</span>
+        <span class='count-badge'>{len(real_ips)}</span>{badge_extra}
       </h2>
       <p style='font-size:12px;color:{C["muted"]};font-family:monospace;margin-bottom:14px'>
         // Potential origin IPs discovered behind CDN / WAF layer
       </p>
       <div style='overflow-x:auto'>
         <table class='data-table'>
-          <thead><tr><th>IP Address</th><th>Discovery Method</th><th>Confidence</th></tr></thead>
+          <thead><tr>
+            <th>IP Address</th><th>Discovery Method</th><th>Confidence</th>
+            <th>Country</th><th>Last Seen</th>
+          </tr></thead>
           <tbody>{rows}</tbody>
         </table>
       </div>
