@@ -110,6 +110,18 @@ NON_HTML_EXTENSIONS = (
 # Keywords that elevate severity to CRITICAL
 CRITICAL_KEYWORDS = (".env", ".git", "backup", "db.sql")
 
+# Expected body keywords per admin-panel path prefix.
+# A 200 response that contains none of these is treated as a catch-all false
+# positive — the server is returning its generic error/home page for that path.
+ADMIN_KEYWORDS: dict[str, list[str]] = {
+    "/phpmyadmin":  ["phpmyadmin", "mysql", "pma"],
+    "/console":     ["console", "rails", "groovy", "shell"],
+    "/h2-console":  ["h2", "java", "H2 Console"],
+    "/wp-admin":    ["wordpress", "wp-login", "WordPress"],
+    "/actuator":    ["actuator", "{"],
+    "/swagger":     ["swagger", "openapi", "Swagger"],
+}
+
 SECURITY_HEADERS = {
     "X-Frame-Options": "Clickjacking protection",
     "Content-Security-Policy": "XSS/injection policy",
@@ -122,7 +134,8 @@ SECURITY_HEADERS = {
 
 
 async def check_endpoint(session, base_url: str, path: str) -> dict:
-    """Probe a single path. Returns actual body byte count, not Content-Length header."""
+    """Probe a single path. Returns actual body byte count, not Content-Length header.
+    Also returns the first 8 KB of decoded body text for keyword verification."""
     url = base_url.rstrip("/") + path
     try:
         async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -136,12 +149,13 @@ async def check_endpoint(session, base_url: str, path: str) -> dict:
                 "size": resp.headers.get("Content-Length", "?"),
                 "content_type": ct,
                 "content_length": len(body),   # actual bytes, not header
+                "body_text": body[:8192].decode("utf-8", errors="ignore"),
                 "interesting": resp.status in (200, 301, 302, 403, 401),
             }
     except Exception:
         return {
             "url": url, "status": 0, "content_type": "",
-            "content_length": 0, "interesting": False,
+            "content_length": 0, "body_text": "", "interesting": False,
         }
 
 
@@ -358,6 +372,16 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                         # proxies serve the same shell HTML for every route;
                         # skip if sizes match closely.
                         if homepage_size >= 0 and abs(body_len - homepage_size) < 1000:
+                            continue
+                        # Keyword verification — only fire if the body actually
+                        # looks like the expected admin panel, not a generic page.
+                        body_text = ep.get("body_text", "").lower()
+                        _kw_match = True
+                        for kw_prefix, kw_list in ADMIN_KEYWORDS.items():
+                            if path.startswith(kw_prefix):
+                                _kw_match = any(kw.lower() in body_text for kw in kw_list)
+                                break
+                        if not _kw_match:
                             continue
                         sev  = Severity.MEDIUM
                         desc = (f"Admin panel returning distinct HTML content "
