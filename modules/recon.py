@@ -112,6 +112,31 @@ def dns_lookup(target: str) -> dict:
     return result
 
 
+async def _fetch_response_headers(url: str) -> dict:
+    """HEAD request to *url*; returns response headers as a plain dict.
+
+    Used to supplement wdata['headers'] when the GOD'S EYE bridge doesn't
+    populate that field, so that header-presence vuln filters work correctly.
+    Returns an empty dict on any failure — callers treat that as 'unknown'.
+    """
+    if not url:
+        return {}
+    import aiohttp
+    import ssl as ssl_lib
+    try:
+        ssl_ctx = ssl_lib.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl_lib.CERT_NONE
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=ssl_ctx),
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as session:
+            async with session.head(url, allow_redirects=True) as resp:
+                return dict(resp.headers)
+    except Exception:
+        return {}
+
+
 async def _check_https_redirect(target: str, port: int) -> bool:
     """Return True if an HTTP request to this port receives a 301/302/307/308
     redirect whose Location starts with 'https://'.  Used to suppress the
@@ -291,11 +316,19 @@ async def run_recon(state: EngagementState, console=None,
             state.add_finding(finding)
 
     for port, wdata in web_results.items():
-        # Pre-compute HTTPS-redirect flag for HTTP ports (filter false positives)
-        _svc_is_http = wdata.get("url", "").startswith("http://")
+        # Pre-compute HTTPS-redirect flag.
+        # Use the port number — not the stored URL — to identify HTTP ports,
+        # because GOD'S EYE stores the *final* (post-redirect) URL.  For port 80
+        # that redirects to HTTPS the stored URL already starts with "https://"
+        # which would wrongly set _svc_is_http=False and skip the redirect check.
         redirects_to_https = False
-        if _svc_is_http:
+        if port in (80, 8080):
             redirects_to_https = await _check_https_redirect(target, port)
+
+        # If GOD'S EYE didn't populate response headers (the bridge omits them),
+        # fetch them with a single HEAD request so header-presence filters work.
+        if not wdata.get("headers"):
+            wdata["headers"] = await _fetch_response_headers(wdata.get("url", ""))
 
         if wdata.get("waf"):
             _add(Finding(
@@ -325,9 +358,6 @@ async def run_recon(state: EngagementState, console=None,
                 ))
 
         # GOD'S EYE vuln findings
-        # DEBUG — print exact vuln names so filter patterns can be verified
-        for v in wdata.get("vulns", []):
-            print(f"DEBUG VULN: '{v.get('name', '')}' port={port}")
         for vuln in wdata.get("vulns", []):
             vuln_name    = vuln.get("name", "")
             evidence     = vuln.get("evidence", "")
