@@ -325,6 +325,9 @@ async def run_recon(state: EngagementState, console=None,
                 ))
 
         # GOD'S EYE vuln findings
+        # DEBUG — print exact vuln names so filter patterns can be verified
+        for v in wdata.get("vulns", []):
+            print(f"DEBUG VULN: '{v.get('name', '')}' port={port}")
         for vuln in wdata.get("vulns", []):
             vuln_name    = vuln.get("name", "")
             evidence     = vuln.get("evidence", "")

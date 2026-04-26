@@ -214,6 +214,36 @@ async def check_security_headers(session, url: str) -> dict:
     return {"missing": missing, "present": present}
 
 
+_CSRF_PATTERNS = [
+    # hidden input fields carrying CSRF tokens
+    r'<input[^>]+name=["\'](_token|csrf_token|csrfmiddlewaretoken|__RequestVerificationToken'
+    r'|authenticity_token|_csrf|csrf|token)["\']',
+    # meta tags (Rails, Angular, etc.)
+    r'<meta[^>]+name=["\']csrf-token["\']',
+]
+
+
+async def _page_has_csrf(session, url: str) -> bool:
+    """Return True if the base page contains a CSRF token field.
+
+    When CSRF protection is in place every POST (and many GET requests that
+    touch state) requires a valid token.  Probing with bare payloads causes
+    400 / 403 responses that can be misread as SQL-error indicators.
+    """
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5),
+                               allow_redirects=True) as resp:
+            if resp.status not in (200, 302):
+                return False
+            body = await resp.text(errors="ignore")
+            for pat in _CSRF_PATTERNS:
+                if re.search(pat, body, re.IGNORECASE):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 async def test_basic_sqli(session, url: str) -> list:
     findings = []
     error_patterns = [
@@ -225,6 +255,12 @@ async def test_basic_sqli(session, url: str) -> list:
         r"PostgreSQL.*ERROR", r"psycopg2",
     ]
 
+    # Skip blind probe when CSRF protection is detected — unauthenticated
+    # requests without a valid token return 400/403 which could be confused
+    # with SQL error responses, causing false positives.
+    if await _page_has_csrf(session, url):
+        return findings
+
     payloads = ["'", "''", "' OR '1'='1", "1' AND SLEEP(1)--"]
     params_to_test = ["id", "user", "username", "search", "q", "name", "page"]
 
@@ -233,6 +269,10 @@ async def test_basic_sqli(session, url: str) -> list:
             test_url = f"{url}?{param}={payload}"
             try:
                 async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    # Skip 400/403/405 — server rejected the request before
+                    # any SQL processing could occur (CSRF, rate-limit, WAF).
+                    if resp.status in (400, 403, 405):
+                        continue
                     body = await resp.text(errors="ignore")
                     for pattern in error_patterns:
                         if re.search(pattern, body, re.IGNORECASE):
