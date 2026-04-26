@@ -325,6 +325,13 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                                f"Content-Type: {ct or 'unknown'} | "
                                f"Body: {body_len} bytes{_baseline_note}")
 
+                # ── Content-type / extension mismatch — always a false positive ──
+                # A real backup.zip or config.yml would never be served as
+                # text/html; skip immediately when the server's catch-all
+                # template answers for a file-extension path.
+                if is_html and has_bin_ext:
+                    continue
+
                 # ── INFO paths — always informational ──────────────────────────
                 if path in INFO_PATHS:
                     _add(Finding(
@@ -343,13 +350,14 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                 if path.startswith(ADMIN_PATH_PREFIXES):
                     if is_html:
                         # Compare body size against the canary-path baseline.
-                        # < 500-byte difference → server returns the same HTML
+                        # < 1000-byte difference → server returns the same HTML
                         # for all URLs (catch-all / soft-404) → skip.
-                        if baseline_size >= 0 and abs(body_len - baseline_size) < 500:
+                        if baseline_size >= 0 and abs(body_len - baseline_size) < 1000:
                             continue
-                        # Compare against homepage body — SPAs return the same
-                        # shell HTML for every route; skip if sizes match closely.
-                        if homepage_size >= 0 and abs(body_len - homepage_size) < 200:
+                        # Compare against homepage body — SPAs and catch-all
+                        # proxies serve the same shell HTML for every route;
+                        # skip if sizes match closely.
+                        if homepage_size >= 0 and abs(body_len - homepage_size) < 1000:
                             continue
                         sev  = Severity.MEDIUM
                         desc = (f"Admin panel returning distinct HTML content "
@@ -381,7 +389,7 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
 
                 # Homepage comparison — skip if response matches homepage body
                 # size (SPA / catch-all proxy serving same shell for all URLs).
-                if homepage_size >= 0 and abs(body_len - homepage_size) < 200:
+                if homepage_size >= 0 and abs(body_len - homepage_size) < 1000:
                     continue
 
                 # Real finding: non-HTML content-type OR binary ext + large body
