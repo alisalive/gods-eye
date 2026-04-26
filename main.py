@@ -189,7 +189,6 @@ async def run_engagement(
     shodan_key: str = None,
     enable_dirbrute: bool = False,
     enable_pdf: bool = False,
-    enable_real_ip: bool = False,
 ):
     print_banner()
     config = load_config(config_path)
@@ -241,22 +240,36 @@ async def run_engagement(
             t.add_row(str(port), info["service"], (info.get("banner", "") or "—")[:50])
         console.print(t)
 
-    # ── Phase 1b: Real IP discovery ───────────────────────────────────────────
-    if enable_real_ip:
-        print_phase_header("Phase 1b — Real IP Discovery", "◆")
-        # Module logs per-result progress; don't wrap in console.status()
-        from modules.real_ip import run_real_ip_discovery
-        real_ips = await run_real_ip_discovery(target, console)
-        state.recon_data["real_ips"] = real_ips
-        if real_ips:
-            confirmed = sum(1 for e in real_ips if e.get("confidence") == "confirmed")
+    # ── Phase 1b: Real IP discovery (always on, 30 s max) ────────────────────
+    print_phase_header("Phase 1b — Real IP Discovery", "◆")
+    from modules.real_ip import run_real_ip_discovery
+    try:
+        real_ips = await asyncio.wait_for(
+            run_real_ip_discovery(target, console),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        real_ips = []
+        console.print("  [yellow]⚡ Real IP discovery timed out (30 s)[/yellow]")
+    state.recon_data["real_ips"] = real_ips
+    confirmed_ips = [e for e in real_ips if e.get("confidence") == "confirmed"]
+    if confirmed_ips:
+        for e in confirmed_ips:
             console.print(
-                f"  [green]✓[/green] Real IP discovery: "
-                f"[bold]{len(real_ips)}[/bold] candidate(s) found"
-                + (f", [bold green]{confirmed} confirmed[/bold green]" if confirmed else "")
+                f"  [green]✓[/green] Confirmed real IP: "
+                f"[bold cyan]{e['ip']}[/bold cyan]"
             )
-        if stealth:
-            await stealth_delay(config)
+    elif real_ips:
+        for e in real_ips:
+            console.print(
+                f"  [dim]→[/dim] Potential real IP: "
+                f"[cyan]{e['ip']}[/cyan] "
+                f"([dim]{e['confidence']} confidence[/dim])"
+            )
+    else:
+        console.print("  [dim]→ Real IP: not found behind CDN[/dim]")
+    if stealth:
+        await stealth_delay(config)
 
     # ── Phase 1c: Shodan enrichment ───────────────────────────────────────────
     if shodan_key:
@@ -433,13 +446,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --target 10.0.0.1 --mode pentest
+  python main.py 10.0.0.1
+  python main.py example.com --mode redteam --stealth --subdomains --screenshot
   python main.py --target 10.0.0.1 --mode pentest --ai --api-key sk-ant-...
-  python main.py --target example.com --mode redteam --stealth --subdomains --screenshot
   python main.py --target 192.168.1.1 --mode pentest --ai --output ./reports
         """
     )
-    parser.add_argument("--target", "-t", required=True, help="Target IP or hostname")
+    parser.add_argument("target", nargs="?", default=None,
+                        help="Target IP or hostname (positional)")
+    parser.add_argument("--target", "-t", dest="target_flag", default=None,
+                        help="Target IP or hostname (flag form)")
     parser.add_argument("--mode", "-m", choices=["pentest", "redteam"], default="pentest")
     parser.add_argument("--ai", action="store_true", help="Enable Claude AI analysis (requires --api-key or ANTHROPIC_API_KEY)")
     parser.add_argument("--api-key", "-k", help="Anthropic API key (or ANTHROPIC_API_KEY env var)")
@@ -454,10 +470,16 @@ Examples:
     parser.add_argument("--shodan-key", default=None, help="Shodan API key for host enrichment")
     parser.add_argument("--dirbrute", action="store_true", help="Enable directory brute-force")
     parser.add_argument("--pdf", action="store_true", help="Export report as PDF")
-    parser.add_argument("--real-ip", dest="real_ip", action="store_true",
-                        help="Attempt to discover the real IP behind CDN/WAF")
 
     args = parser.parse_args()
+
+    target = args.target or args.target_flag
+    if not target:
+        parser.error(
+            "target is required: pass it as a positional argument or via --target/-t\n"
+            "  e.g.  godseye example.com\n"
+            "  e.g.  godseye --target example.com"
+        )
 
     api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
     shodan_key = args.shodan_key or os.environ.get("SHODAN_API_KEY")
@@ -472,7 +494,7 @@ Examples:
 
     try:
         asyncio.run(run_engagement(
-            target=args.target,
+            target=target,
             mode=args.mode,
             api_key=api_key,
             output_dir=output_dir,
@@ -486,7 +508,6 @@ Examples:
             shodan_key=shodan_key,
             enable_dirbrute=args.dirbrute,
             enable_pdf=args.pdf,
-            enable_real_ip=args.real_ip,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user[/yellow]")

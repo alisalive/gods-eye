@@ -138,22 +138,29 @@ def _strip_tags(html: str) -> str:
     return text.strip()
 
 
-def _date_confidence(date_str: str) -> str:
-    """Score recency of *date_str*: recent→high, moderate→medium, old→low."""
+def _date_age_days(date_str: str) -> Optional[int]:
+    """Return number of days since *date_str*, or None if unparseable."""
     if not date_str:
-        return "low"
+        return None
     for fmt in ("%Y-%m-%d", "%d %b %Y", "%B %d, %Y",
                 "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
         try:
             dt = datetime.datetime.strptime(date_str.strip(), fmt)
-            days = (datetime.datetime.now() - dt).days
-            if days < 90:
-                return "high"
-            if days < 365:
-                return "medium"
-            return "low"
+            return (datetime.datetime.now() - dt).days
         except ValueError:
             continue
+    return None
+
+
+def _date_confidence(date_str: str) -> str:
+    """Score recency of *date_str*: recent→high, moderate→medium, old→low."""
+    days = _date_age_days(date_str)
+    if days is None:
+        return "low"
+    if days < 90:
+        return "high"
+    if days < 365:
+        return "medium"
     return "low"
 
 
@@ -207,6 +214,31 @@ async def _fetch_get(url: str, timeout: int = 12,
                 return await resp.text(errors="ignore")
     except Exception:
         return ""
+
+
+async def _fetch_with_status(url: str, timeout: int = 12,
+                             extra_headers: Optional[dict] = None,
+                             verify_ssl: bool = True) -> tuple:
+    """Async GET; returns (status_code, body_text). Returns (0, '') on failure."""
+    try:
+        import aiohttp
+        import ssl as ssl_lib
+        if not verify_ssl:
+            ctx = ssl_lib.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl_lib.CERT_NONE
+        else:
+            ctx = None
+        hdrs = {**_BROWSER_HEADERS, **(extra_headers or {})}
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=ctx),
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as s:
+            async with s.get(url, headers=hdrs) as resp:
+                body = await resp.text(errors="ignore")
+                return resp.status, body
+    except Exception:
+        return 0, ""
 
 
 async def _fetch_post(url: str, form_data: dict, timeout: int = 10) -> str:
@@ -271,6 +303,10 @@ async def _method_viewdns_history(target: str) -> list[dict]:
         country   = _strip_tags(cells[1])[:60]
         last_seen = _strip_tags(cells[3])
         if not _valid_public_ip(ip) or is_cdn_ip(ip) or ip in seen:
+            continue
+        # Skip IPs older than 2 years — too stale to be reliable
+        age = _date_age_days(last_seen)
+        if age is not None and age > 730:
             continue
         seen.add(ip)
         results.append(_blank_entry(
@@ -355,11 +391,12 @@ async def _method_subdomain_dns(target: str, site_fp: dict) -> list[dict]:
 # ── Verification helpers ──────────────────────────────────────────────────────
 
 async def _get_site_fingerprint(target: str) -> dict:
-    """Fetch the canonical site; return title + body-hash fingerprint."""
+    """Fetch the canonical site; return status + title + body-hash fingerprint."""
     for proto in ("https", "http"):
-        html = await _fetch_get(f"{proto}://{target}/", timeout=10)
-        if html:
+        status, html = await _fetch_with_status(f"{proto}://{target}/", timeout=10)
+        if html and status:
             return {
+                "status":    status,
                 "title":     _extract_title(html),
                 "body_hash": _body_hash(html),
                 "proto":     proto,
@@ -368,22 +405,37 @@ async def _get_site_fingerprint(target: str) -> dict:
 
 
 async def _http_matches_site(ip: str, target: str, fingerprint: dict) -> bool:
-    """Return True if GETting *ip* with Host: *target* serves the same page."""
+    """Return True if GETting *ip* with Host: *target* serves the same page.
+
+    Requires BOTH:
+      • HTTP status compatible with the real site (exact match or both 2xx–3xx)
+      • Content match: title equality OR body-hash equality
+    """
     if not fingerprint:
         return False
+    fp_status = fingerprint.get("status", 0)
     for proto in ("https", "http"):
-        html = await _fetch_get(
+        status, html = await _fetch_with_status(
             f"{proto}://{ip}/",
             timeout=8,
             extra_headers={"Host": target},
             verify_ssl=False,
         )
-        if not html:
+        if not html or not status:
             continue
+        # Status must be compatible
+        status_ok = (
+            not fp_status                                        # baseline unknown → skip check
+            or status == fp_status                               # exact match
+            or (200 <= status < 400 and 200 <= fp_status < 400) # both success/redirect
+        )
+        if not status_ok:
+            continue
+        # Content must match (title AND/OR body hash)
         fp_title = fingerprint.get("title", "")
         fp_bh    = fingerprint.get("body_hash", "")
-        title = _extract_title(html)
-        bh    = _body_hash(html)
+        title    = _extract_title(html)
+        bh       = _body_hash(html)
         if fp_title and title and fp_title.lower() == title.lower():
             return True
         if fp_bh and bh and fp_bh == bh:
@@ -436,26 +488,26 @@ async def run_real_ip_discovery(target: str, console=None) -> list[dict]:
     log("Fetching site fingerprint for HTTP verification...")
     site_fp = await _get_site_fingerprint(target)
 
-    # ── Phase 2: passive discovery sources ───────────────────────────────────
-    log("ViewDNS IP history...")
-    m1 = await _method_viewdns_history(target)
+    # ── Phase 2: discovery sources (subdomains first — most reliable) ────────
+    log("Subdomain bypass probe + inline HTTP verification (most reliable)...")
+    m_sub = await _method_subdomain_dns(target, site_fp)
 
-    log("SecurityTrails DNS history...")
-    m2 = await _method_securitytrails(target)
+    log("ViewDNS IP history...")
+    m_vdns = await _method_viewdns_history(target)
 
     log("CrimeFlare Cloudflare-bypass DB...")
-    m3 = await _method_crimeflare(target)
+    m_cf = await _method_crimeflare(target)
 
     log("crt.sh certificate transparency...")
-    m4 = await _method_crtsh(target)
+    m_crt = await _method_crtsh(target)
 
-    log("Subdomain bypass probe + inline HTTP verification...")
-    m5 = await _method_subdomain_dns(target, site_fp)
+    log("SecurityTrails DNS history...")
+    m_st = await _method_securitytrails(target)
 
     # ── Phase 3: deduplicate (highest confidence wins per IP) ─────────────────
     by_ip: dict[str, dict] = {}
-    # Process highest-confidence sources first so they win on IP collision
-    for entry in m3 + m1 + m5 + m2 + m4:
+    # confirmed (subdomain) → high (crimeflare/viewdns) → medium → low
+    for entry in m_sub + m_cf + m_vdns + m_st + m_crt:
         ip = entry["ip"]
         existing = by_ip.get(ip)
         if existing is None:

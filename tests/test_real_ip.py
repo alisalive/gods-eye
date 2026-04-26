@@ -18,6 +18,7 @@ from modules.real_ip import (
     _extract_ips,
     _filter_ips,
     _strip_tags,
+    _date_age_days,
     _date_confidence,
     _extract_title,
     _body_hash,
@@ -160,6 +161,27 @@ class TestStripTags:
         assert _strip_tags(None) == ""
 
 
+class TestDateAgeDays:
+    def _ago(self, days: int) -> str:
+        return (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+
+    def test_returns_int(self):
+        result = _date_age_days(self._ago(30))
+        assert isinstance(result, int)
+        assert 29 <= result <= 31  # allow ±1 day for test timing
+
+    def test_empty_returns_none(self):
+        assert _date_age_days("") is None
+        assert _date_age_days(None) is None
+
+    def test_invalid_returns_none(self):
+        assert _date_age_days("not-a-date") is None
+
+    def test_2_years_ago(self):
+        result = _date_age_days(self._ago(800))
+        assert result is not None and result > 730
+
+
 class TestDateConfidence:
     def _ago(self, days: int) -> str:
         return (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
@@ -224,7 +246,11 @@ class TestBodyHash:
 
 # ── ViewDNS history ───────────────────────────────────────────────────────────
 
-_VIEWDNS_HTML = """
+_VIEWDNS_RECENT_DATE_99 = (
+    datetime.datetime.now() - datetime.timedelta(days=30)
+).strftime("%Y-%m-%d")
+
+_VIEWDNS_HTML = f"""
 <html><body>
 <table border="1">
 <tr><td>IP Address</td><td>Location</td><td>Owner</td><td>Last seen</td></tr>
@@ -244,7 +270,7 @@ _VIEWDNS_HTML = """
   <td>203.0.113.99</td>
   <td>Germany</td>
   <td>Some ISP</td>
-  <td>2024-01-15</td>
+  <td>{_VIEWDNS_RECENT_DATE_99}</td>
 </tr>
 </table>
 </body></html>
@@ -300,6 +326,25 @@ async def test_viewdns_history_empty_response():
     with patch("modules.real_ip._fetch_get", return_value=""):
         results = await _method_viewdns_history("example.com")
     assert results == []
+
+
+@pytest.mark.asyncio
+async def test_viewdns_history_skips_ips_older_than_2_years():
+    """IPs with last_seen > 730 days ago must be excluded."""
+    today = datetime.datetime.now()
+    old_date   = (today - datetime.timedelta(days=800)).strftime("%Y-%m-%d")
+    fresh_date = (today - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+    html = f"""
+    <table>
+      <tr><td>IP</td><td>Loc</td><td>Own</td><td>Last seen</td></tr>
+      <tr><td>85.132.10.5</td><td>AZ</td><td>ISP</td><td>{old_date}</td></tr>
+      <tr><td>203.0.113.1</td><td>DE</td><td>ISP2</td><td>{fresh_date}</td></tr>
+    </table>"""
+    with patch("modules.real_ip._fetch_get", return_value=html):
+        results = await _method_viewdns_history("example.com")
+    ips = [r["ip"] for r in results]
+    assert "85.132.10.5" not in ips   # too old
+    assert "203.0.113.1" in ips       # fresh
 
 
 # ── CrimeFlare ────────────────────────────────────────────────────────────────
@@ -389,9 +434,10 @@ async def test_subdomain_dns_verified_inline():
     def fake_resolve(hostname):
         return ["85.132.10.5"] if "direct." in hostname else []
 
+    fp = {"status": 200, "title": "Test Site", "body_hash": "abc", "proto": "https"}
     with patch("modules.real_ip._dns_resolve", side_effect=fake_resolve), \
          patch("modules.real_ip._http_matches_site", return_value=True):
-        results = await _method_subdomain_dns("example.com", {"title": "Test"})
+        results = await _method_subdomain_dns("example.com", fp)
 
     confirmed = [r for r in results if r["ip"] == "85.132.10.5"]
     assert confirmed
@@ -431,47 +477,57 @@ async def test_shodan_verify_null_response():
 
 @pytest.mark.asyncio
 async def test_http_matches_site_by_title():
-    fp = {"title": "My Site Title", "body_hash": "aaaa", "proto": "https"}
+    fp = {"status": 200, "title": "My Site Title", "body_hash": "aaaa", "proto": "https"}
     html = "<html><head><title>My Site Title</title></head></html>"
-    with patch("modules.real_ip._fetch_get", return_value=html):
+    with patch("modules.real_ip._fetch_with_status", return_value=(200, html)):
         assert await _http_matches_site("85.132.10.5", "example.com", fp) is True
 
 
 @pytest.mark.asyncio
 async def test_http_matches_site_by_body_hash():
     content = "<html><body><p>Unique content here 12345</p></body></html>"
-    fp = {"title": "", "body_hash": _body_hash(content), "proto": "https"}
-    with patch("modules.real_ip._fetch_get", return_value=content):
+    fp = {"status": 200, "title": "", "body_hash": _body_hash(content), "proto": "https"}
+    with patch("modules.real_ip._fetch_with_status", return_value=(200, content)):
         assert await _http_matches_site("85.132.10.5", "example.com", fp) is True
 
 
 @pytest.mark.asyncio
 async def test_http_matches_site_no_match():
-    fp = {"title": "Expected Title", "body_hash": "expected_hash", "proto": "https"}
+    fp = {"status": 200, "title": "Expected Title", "body_hash": "expected_hash", "proto": "https"}
     other_html = "<html><title>Different Title</title><body>Other content</body></html>"
-    with patch("modules.real_ip._fetch_get", return_value=other_html):
+    with patch("modules.real_ip._fetch_with_status", return_value=(200, other_html)):
+        assert await _http_matches_site("1.2.3.4", "example.com", fp) is False
+
+
+@pytest.mark.asyncio
+async def test_http_matches_site_status_mismatch():
+    """Mismatched status (200 vs 404) must prevent confirmation even if title matches."""
+    fp = {"status": 200, "title": "My Site", "body_hash": "x", "proto": "https"}
+    html = "<html><title>My Site</title></html>"
+    with patch("modules.real_ip._fetch_with_status", return_value=(404, html)):
         assert await _http_matches_site("1.2.3.4", "example.com", fp) is False
 
 
 @pytest.mark.asyncio
 async def test_http_matches_site_empty_fingerprint():
-    with patch("modules.real_ip._fetch_get", return_value="<title>X</title>"):
+    with patch("modules.real_ip._fetch_with_status", return_value=(200, "<title>X</title>")):
         assert await _http_matches_site("1.2.3.4", "example.com", {}) is False
 
 
 @pytest.mark.asyncio
 async def test_get_site_fingerprint():
     html = "<html><head><title>Test Site</title></head><body>Hello</body></html>"
-    with patch("modules.real_ip._fetch_get", return_value=html):
+    with patch("modules.real_ip._fetch_with_status", return_value=(200, html)):
         fp = await _get_site_fingerprint("example.com")
     assert fp["title"] == "Test Site"
+    assert fp["status"] == 200
     assert len(fp["body_hash"]) == 32
     assert fp["proto"] in ("https", "http")
 
 
 @pytest.mark.asyncio
 async def test_get_site_fingerprint_all_fail():
-    with patch("modules.real_ip._fetch_get", return_value=""):
+    with patch("modules.real_ip._fetch_with_status", return_value=(0, "")):
         fp = await _get_site_fingerprint("example.com")
     assert fp == {}
 
@@ -503,6 +559,7 @@ async def test_full_pipeline_basic():
         return ""
 
     with patch("modules.real_ip._fetch_get", side_effect=fake_fetch_get), \
+         patch("modules.real_ip._fetch_with_status", return_value=(0, "")), \
          patch("modules.real_ip._fetch_post", return_value=""), \
          patch("modules.real_ip._fetch_json", return_value=None), \
          patch("modules.real_ip._dns_resolve", return_value=[]):
@@ -518,6 +575,7 @@ async def test_full_pipeline_no_results():
     """Returns empty list when all discovered IPs are CDN."""
     with patch("modules.real_ip._fetch_get",
                return_value="<body>104.16.1.1 172.67.0.1</body>"), \
+         patch("modules.real_ip._fetch_with_status", return_value=(0, "")), \
          patch("modules.real_ip._fetch_post", return_value="104.16.1.1"), \
          patch("modules.real_ip._fetch_json", return_value=None), \
          patch("modules.real_ip._dns_resolve", return_value=["172.67.0.1"]):
@@ -536,6 +594,7 @@ async def test_full_pipeline_dedup_keeps_highest_confidence():
         return ""
 
     with patch("modules.real_ip._fetch_get", side_effect=fake_fetch_get), \
+         patch("modules.real_ip._fetch_with_status", return_value=(0, "")), \
          patch("modules.real_ip._fetch_post", return_value=crimeflare_html), \
          patch("modules.real_ip._fetch_json", return_value=crtsh_json), \
          patch("modules.real_ip._dns_resolve", return_value=[]):
@@ -555,15 +614,13 @@ async def test_full_pipeline_http_verification_upgrades_to_confirmed():
     <tr><td>85.132.10.5</td><td>AZ</td><td>ISP</td><td>{_RECENT_DATE}</td></tr>
     </table>"""
 
-    call_count = {"n": 0}
-
     async def fake_fetch_get(url, **kwargs):
-        call_count["n"] += 1
         if "viewdns.info/iphistory" in url:
             return viewdns_html
-        return site_html  # fingerprint + verification both return same content
+        return ""
 
     with patch("modules.real_ip._fetch_get", side_effect=fake_fetch_get), \
+         patch("modules.real_ip._fetch_with_status", return_value=(200, site_html)), \
          patch("modules.real_ip._fetch_post", return_value=""), \
          patch("modules.real_ip._fetch_json", return_value=None), \
          patch("modules.real_ip._dns_resolve", return_value=[]):
@@ -580,7 +637,7 @@ async def test_full_pipeline_shodan_upgrades_confidence():
     """IP confirmed by Shodan gets verified=True and confidence≥high."""
     viewdns_html = f"""
     <table><tr><td>IP</td><td>L</td><td>O</td><td>Last seen</td></tr>
-    <tr><td>85.132.10.5</td><td>AZ</td><td>ISP</td><td>2024-01-01</td></tr>
+    <tr><td>85.132.10.5</td><td>AZ</td><td>ISP</td><td>{_RECENT_DATE}</td></tr>
     </table>"""
 
     shodan_resp = {"ip": "85.132.10.5", "hostnames": ["example.com"]}
@@ -591,6 +648,7 @@ async def test_full_pipeline_shodan_upgrades_confidence():
         return ""
 
     with patch("modules.real_ip._fetch_get", side_effect=fake_fetch_get), \
+         patch("modules.real_ip._fetch_with_status", return_value=(0, "")), \
          patch("modules.real_ip._fetch_post", return_value=""), \
          patch("modules.real_ip._fetch_json", return_value=shodan_resp), \
          patch("modules.real_ip._dns_resolve", return_value=[]):
@@ -606,21 +664,21 @@ async def test_full_pipeline_shodan_upgrades_confidence():
 async def test_full_pipeline_sorted_confirmed_first():
     """confirmed entries must appear before high/medium/low entries."""
     site_html = "<html><title>My Site</title><body>unique body 99999</body></html>"
+    # One fresh IP (will be confirmed by HTTP verify), one old but within 2y
     viewdns_html = f"""
     <table><tr><td>IP</td><td>L</td><td>O</td><td>Last seen</td></tr>
     <tr><td>85.132.10.5</td><td>AZ</td><td>ISP</td><td>{_RECENT_DATE}</td></tr>
-    <tr><td>203.0.113.1</td><td>DE</td><td>ISP2</td><td>2020-01-01</td></tr>
+    <tr><td>203.0.113.1</td><td>DE</td><td>ISP2</td><td>{_RECENT_DATE}</td></tr>
     </table>"""
 
-    call_urls: list[str] = []
-
     async def fake_fetch_get(url, **kwargs):
-        call_urls.append(url)
-        if "viewdns.info/iphistory" in url:
-            return viewdns_html
-        return site_html  # all other fetches (fingerprint + verification) match
+        return viewdns_html if "viewdns.info/iphistory" in url else ""
+
+    async def fake_fetch_with_status(url, **kwargs):
+        return 200, site_html  # fingerprint + both IPs verify OK
 
     with patch("modules.real_ip._fetch_get", side_effect=fake_fetch_get), \
+         patch("modules.real_ip._fetch_with_status", side_effect=fake_fetch_with_status), \
          patch("modules.real_ip._fetch_post", return_value=""), \
          patch("modules.real_ip._fetch_json", return_value=None), \
          patch("modules.real_ip._dns_resolve", return_value=[]):
@@ -644,6 +702,7 @@ async def test_full_pipeline_result_schema():
         return viewdns_html if "viewdns" in url else ""
 
     with patch("modules.real_ip._fetch_get", side_effect=fake_fetch_get), \
+         patch("modules.real_ip._fetch_with_status", return_value=(0, "")), \
          patch("modules.real_ip._fetch_post", return_value=""), \
          patch("modules.real_ip._fetch_json", return_value=None), \
          patch("modules.real_ip._dns_resolve", return_value=[]):
