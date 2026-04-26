@@ -164,6 +164,26 @@ async def get_baseline_body_size(session, base_url: str) -> int:
         return -1  # baseline unavailable — skip comparison
 
 
+async def get_homepage_body_size(session, base_url: str) -> int:
+    """Fetch the homepage (GET /) to establish a content baseline.
+
+    Returns the actual body byte count, or -1 if the request fails.
+    Catches SPAs and catch-all proxies that serve the same HTML for every URL —
+    these may differ from the canary baseline but still match the homepage body.
+    """
+    homepage_url = base_url.rstrip("/") + "/"
+    try:
+        async with session.get(
+            homepage_url,
+            allow_redirects=True,
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            body = await resp.content.read(512 * 1024)
+            return len(body)
+    except Exception:
+        return -1  # baseline unavailable — skip comparison
+
+
 async def check_security_headers(session, url: str) -> dict:
     missing = []
     present = []
@@ -277,7 +297,8 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
 
             # Soft-404 baseline — one canary request per host
             log(f"Fetching soft-404 baseline for {base_url}...")
-            baseline_size = await get_baseline_body_size(session, base_url)
+            baseline_size  = await get_baseline_body_size(session, base_url)
+            homepage_size  = await get_homepage_body_size(session, base_url)
 
             # Endpoint enumeration
             log(f"Endpoint enumeration ({len(SENSITIVE_ENDPOINTS)} paths)...")
@@ -295,11 +316,14 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                 body_len    = ep.get("content_length", 0)
                 is_html     = "text/html" in ct
                 has_bin_ext = path.lower().endswith(NON_HTML_EXTENSIONS)
+                _baseline_note = ""
+                if baseline_size >= 0:
+                    _baseline_note += f" | canary: {baseline_size}B"
+                if homepage_size >= 0:
+                    _baseline_note += f" | homepage: {homepage_size}B"
                 evidence    = (f"HTTP {ep['status']} | "
                                f"Content-Type: {ct or 'unknown'} | "
-                               f"Body: {body_len} bytes"
-                               + (f" (baseline: {baseline_size} bytes)"
-                                  if baseline_size >= 0 else ""))
+                               f"Body: {body_len} bytes{_baseline_note}")
 
                 # ── INFO paths — always informational ──────────────────────────
                 if path in INFO_PATHS:
@@ -322,6 +346,10 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                         # < 500-byte difference → server returns the same HTML
                         # for all URLs (catch-all / soft-404) → skip.
                         if baseline_size >= 0 and abs(body_len - baseline_size) < 500:
+                            continue
+                        # Compare against homepage body — SPAs return the same
+                        # shell HTML for every route; skip if sizes match closely.
+                        if homepage_size >= 0 and abs(body_len - homepage_size) < 200:
                             continue
                         sev  = Severity.MEDIUM
                         desc = (f"Admin panel returning distinct HTML content "
@@ -349,6 +377,11 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
                 # Skip if HTML response with no binary extension clues
                 # (soft-404 / redirect page masquerading as 200)
                 if is_html and not (has_bin_ext and body_len > 5000):
+                    continue
+
+                # Homepage comparison — skip if response matches homepage body
+                # size (SPA / catch-all proxy serving same shell for all URLs).
+                if homepage_size >= 0 and abs(body_len - homepage_size) < 200:
                     continue
 
                 # Real finding: non-HTML content-type OR binary ext + large body
