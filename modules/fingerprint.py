@@ -140,6 +140,41 @@ def detect_cms_from_headers(headers: dict) -> list:
     return results
 
 
+def _joomla_body_indicators(body: str) -> tuple:
+    """
+    Count Joomla-specific indicators present in an HTML body.
+
+    Checks three body-only signals:
+      1. /media/system/js/ path referenced in HTML
+      2. <meta name="generator"> contains "Joomla"
+      3. literal "Joomla!" text appears in the page
+
+    Returns (score: int, evidence: list[str]).
+    A score of 2+ is required before reporting Joomla — this prevents false
+    positives on sites (e.g. Bitrix, Laravel) that share superficially similar
+    path patterns such as /components/com_*.
+    """
+    score = 0
+    evidence: list = []
+
+    if re.search(r'/media/system/js/', body, re.IGNORECASE):
+        score += 1
+        evidence.append("/media/system/js/ path in HTML")
+
+    if (re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\'][^"\']*Joomla',
+                  body, re.IGNORECASE)
+            or re.search(r'content=["\'][^"\']*Joomla[^"\']*["\'][^>]+name=["\']generator["\']',
+                         body, re.IGNORECASE)):
+        score += 1
+        evidence.append("meta generator: Joomla")
+
+    if re.search(r'\bJoomla!', body):
+        score += 1
+        evidence.append('"Joomla!" text in body')
+
+    return score, evidence
+
+
 def detect_cms_from_body(body: str) -> list:
     """Detect CMS from HTML body (asset paths, meta generator tag)."""
     results = []
@@ -164,15 +199,20 @@ def detect_cms_from_body(body: str) -> list:
                         "confidence": "high", "category": "CMS",
                         "evidence": "/wp-includes/ or /wp-content/ paths in HTML"})
 
-    # Joomla
-    if re.search(r'/media/system/js/|/components/com_|/modules/mod_', body, re.IGNORECASE):
+    # Joomla — require 2+ distinct indicators to prevent false positives.
+    # A single path pattern like /components/com_* also appears in Bitrix,
+    # Laravel, and other frameworks, so it is deliberately excluded here.
+    _jscore, _jev = _joomla_body_indicators(body)
+    if _jscore >= 2:
         version = ""
         m = re.search(r'content=["\'][^"\']*Joomla!\s*([\d.]+)', body, re.IGNORECASE)
         if m:
             version = m.group(1)
         results.append({"name": "Joomla", "version": version,
                         "confidence": "high", "category": "CMS",
-                        "evidence": "/media/system/js/ or /components/com_ paths"})
+                        "evidence": "; ".join(_jev)})
+    # _jscore == 1: only one body signal — not reported from body alone;
+    # run_fingerprint() may still promote to "high" via /administrator/ probe.
 
     # Drupal
     if re.search(r'/sites/default/files/|drupalSettings|Drupal\.settings', body, re.IGNORECASE):
@@ -279,9 +319,10 @@ def detect_frameworks_from_body(body: str) -> list:
 
 # ── CMS path probing ──────────────────────────────────────────────────────────
 
+# Joomla is handled separately via _joomla_body_indicators + /administrator/ probe
+# because it requires a multi-indicator score to avoid false positives.
 _CMS_PROBE_PATHS = [
     ("/wp-login.php",   "WordPress", "CMS"),
-    ("/administrator/", "Joomla",    "CMS"),
     ("/sites/default/", "Drupal",    "CMS"),
 ]
 
@@ -332,7 +373,7 @@ async def run_fingerprint(base_url: str, console=None) -> dict:
         for t in detect_frameworks_from_body(body):
             _add(t)
 
-    # 2. CMS path probing
+    # 2. CMS path probing (WordPress, Drupal)
     for path, cms_name, category in _CMS_PROBE_PATHS:
         url = base_url.rstrip("/") + path
         p_status, _, _, _ = await _fetch_page(url, timeout=6)
@@ -342,6 +383,32 @@ async def run_fingerprint(base_url: str, console=None) -> dict:
                 "name": cms_name, "version": "",
                 "confidence": confidence, "category": category,
                 "evidence": f"HTTP {p_status} on {path}",
+            })
+
+    # 3. Joomla — dedicated multi-indicator check (requires 2+ signals).
+    #    Body analysis in detect_cms_from_body() already handles the case where
+    #    2+ body indicators are present.  Here we handle the "1 body indicator +
+    #    /administrator/ probe" path so we don't over-fire on non-Joomla sites.
+    if "joomla" not in seen:
+        _jscore, _jev = _joomla_body_indicators(body)
+        if _jscore == 1:
+            # One body indicator found — probe /administrator/ to confirm
+            _adm_url = base_url.rstrip("/") + "/administrator/"
+            _adm_status, _, _adm_body, _ = await _fetch_page(_adm_url, timeout=6)
+            if (_adm_status == 200
+                    and re.search(r'administrator|joomla', _adm_body or "", re.IGNORECASE)):
+                _jev.append("HTTP 200 on /administrator/ with matching content")
+                _jscore += 1
+
+        if _jscore >= 2:
+            _version = ""
+            _vm = re.search(r'content=["\'][^"\']*Joomla!\s*([\d.]+)', body, re.IGNORECASE)
+            if _vm:
+                _version = _vm.group(1)
+            _add({
+                "name": "Joomla", "version": _version,
+                "confidence": "high", "category": "CMS",
+                "evidence": "; ".join(_jev),
             })
 
     return {"base_url": base_url, "technologies": technologies}

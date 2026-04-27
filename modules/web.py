@@ -618,6 +618,27 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
             baseline_size  = await get_baseline_body_size(session, base_url)
             homepage_size  = await get_homepage_body_size(session, base_url, console)
 
+            # Last-resort homepage fallback: if both async probes in
+            # get_homepage_body_size() failed (SSL quirks, redirect loops, etc.)
+            # try a bare synchronous requests.get so the /h2-console and other
+            # admin-path comparisons have a baseline to work against.
+            if homepage_size == -1:
+                try:
+                    import requests as _req_sync
+                    import urllib3 as _urllib3_sync
+                    _urllib3_sync.disable_warnings(
+                        _urllib3_sync.exceptions.InsecureRequestWarning
+                    )
+                    _sync_r = _req_sync.get(
+                        base_url.rstrip("/") + "/",
+                        verify=False, timeout=10, allow_redirects=True,
+                    )
+                    homepage_size = len(_sync_r.content)
+                    log(f"Homepage baseline recovered via requests fallback "
+                        f"({homepage_size} bytes)")
+                except Exception:
+                    pass  # still -1 — comparisons will be skipped
+
             # Endpoint enumeration
             log(f"Endpoint enumeration ({len(SENSITIVE_ENDPOINTS)} paths)...")
             tasks = [check_endpoint(session, base_url, ep) for ep in SENSITIVE_ENDPOINTS]

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from modules.fingerprint import (
     _hget,
+    _joomla_body_indicators,
     detect_server,
     detect_language,
     detect_cms_from_headers,
@@ -165,6 +166,57 @@ class TestDetectCmsFromHeaders:
 # detect_cms_from_body
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# _joomla_body_indicators — pure scoring helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestJoomlaBodyIndicators:
+    def test_media_system_js_scores_one(self):
+        score, ev = _joomla_body_indicators(
+            '<script src="/media/system/js/core.js"></script>'
+        )
+        assert score == 1
+        assert any("media/system/js" in e for e in ev)
+
+    def test_meta_generator_joomla_scores_one(self):
+        score, ev = _joomla_body_indicators(
+            '<meta name="generator" content="Joomla! 4.3">'
+        )
+        assert score >= 1
+        assert any("meta generator" in e for e in ev)
+
+    def test_joomla_text_scores_one(self):
+        score, ev = _joomla_body_indicators(
+            "<p>Powered by Joomla!</p>"
+        )
+        assert score >= 1
+
+    def test_two_indicators_score_two(self):
+        body = (
+            '<meta name="generator" content="Joomla! 4.3">'
+            '<script src="/media/system/js/core.js"></script>'
+        )
+        score, _ = _joomla_body_indicators(body)
+        assert score >= 2
+
+    def test_components_com_scores_zero(self):
+        """Paths like /components/com_X exist in Bitrix — must not score."""
+        score, _ = _joomla_body_indicators(
+            '<script src="/components/com_example/script.js"></script>'
+        )
+        assert score == 0
+
+    def test_empty_body_zero(self):
+        score, _ = _joomla_body_indicators("")
+        assert score == 0
+
+    def test_plain_page_zero(self):
+        score, _ = _joomla_body_indicators(
+            "<html><body><p>Hello world</p></body></html>"
+        )
+        assert score == 0
+
+
 class TestDetectCmsFromBody:
     _WP_BODY = """
     <html>
@@ -206,6 +258,18 @@ class TestDetectCmsFromBody:
         r = detect_cms_from_body(self._JOOMLA_BODY)
         joomla = next(e for e in r if e["name"] == "Joomla")
         assert joomla["version"] == "4.3.3"
+
+    def test_joomla_single_indicator_not_reported(self):
+        """Only /media/system/js/ alone (1 indicator) must NOT report Joomla."""
+        body = '<script src="/media/system/js/core.js"></script>'
+        r = detect_cms_from_body(body)
+        assert not any(e["name"] == "Joomla" for e in r)
+
+    def test_joomla_components_com_not_reported(self):
+        """/components/com_ alone (0 Joomla indicators) must NOT report Joomla."""
+        body = '<script src="/components/com_example/app.js"></script>'
+        r = detect_cms_from_body(body)
+        assert not any(e["name"] == "Joomla" for e in r)
 
     def test_drupal_detected(self):
         r = detect_cms_from_body(self._DRUPAL_BODY)
@@ -429,19 +493,81 @@ async def test_run_fingerprint_angular_version():
 
 
 @pytest.mark.asyncio
-async def test_run_fingerprint_cms_probe_joomla_403():
-    """A 403 on /administrator/ still signals Joomla with medium confidence."""
+async def test_run_fingerprint_joomla_not_reported_on_403_alone():
+    """403 on /administrator/ with no body indicators must NOT report Joomla."""
     async def fake_fetch(url, timeout=10):
         if "/administrator/" in url:
             return 403, {}, "Forbidden", []
-        return 200, {}, "<html></html>", []
+        return 200, {}, "<html><body>No Joomla markers here</body></html>", []
+
+    with patch("modules.fingerprint._fetch_page", side_effect=fake_fetch):
+        result = await run_fingerprint("https://example.com")
+
+    assert not any(t["name"] == "Joomla" for t in result["technologies"])
+
+
+@pytest.mark.asyncio
+async def test_run_fingerprint_joomla_one_body_plus_admin_200():
+    """1 body indicator + /administrator/ 200 with Joomla content → detected."""
+    one_indicator_body = (
+        "<html><body>"
+        '<script src="/media/system/js/core.js"></script>'
+        "</body></html>"
+    )
+    admin_body = "<html><title>Joomla! Administrator</title></html>"
+
+    async def fake_fetch(url, timeout=10):
+        if "/administrator/" in url:
+            return 200, {}, admin_body, []
+        if "/wp-login.php" in url or "/sites/default/" in url:
+            return 404, {}, "", []
+        return 200, {}, one_indicator_body, []
 
     with patch("modules.fingerprint._fetch_page", side_effect=fake_fetch):
         result = await run_fingerprint("https://example.com")
 
     joomla = next((t for t in result["technologies"] if t["name"] == "Joomla"), None)
     assert joomla is not None
-    assert joomla["confidence"] in ("high", "medium")
+    assert joomla["confidence"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_run_fingerprint_joomla_one_indicator_admin_403_not_reported():
+    """1 body indicator + /administrator/ 403 → Joomla NOT reported."""
+    one_indicator_body = (
+        '<html><body><script src="/media/system/js/core.js"></script></body></html>'
+    )
+
+    async def fake_fetch(url, timeout=10):
+        if "/administrator/" in url:
+            return 403, {}, "Forbidden", []
+        return 200, {}, one_indicator_body, []
+
+    with patch("modules.fingerprint._fetch_page", side_effect=fake_fetch):
+        result = await run_fingerprint("https://example.com")
+
+    assert not any(t["name"] == "Joomla" for t in result["technologies"])
+
+
+@pytest.mark.asyncio
+async def test_run_fingerprint_joomla_bitrix_false_positive():
+    """Bitrix site with /components/com_ paths must NOT trigger Joomla detection."""
+    bitrix_body = (
+        "<html><body>"
+        '<script src="/components/com_example/script.js"></script>'
+        '<link href="/modules/mod_header/style.css">'
+        "</body></html>"
+    )
+
+    async def fake_fetch(url, timeout=10):
+        if "/administrator/" in url:
+            return 404, {}, "", []
+        return 200, {}, bitrix_body, []
+
+    with patch("modules.fingerprint._fetch_page", side_effect=fake_fetch):
+        result = await run_fingerprint("https://bitrix-site.example")
+
+    assert not any(t["name"] == "Joomla" for t in result["technologies"])
 
 
 @pytest.mark.asyncio
