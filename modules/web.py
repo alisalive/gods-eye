@@ -366,12 +366,14 @@ async def get_homepage_body_size(session, base_url: str,
                                  console=None) -> int:
     """Fetch the homepage (GET /) to establish a content baseline.
 
+    Both the aiohttp primary and the requests fallback use ``allow_redirects=True``
+    so that HTTP 3xx chains are followed and the final destination page size is
+    measured — not just the redirect stub (which is typically < 1 KB and would
+    cause every other page to look like a false positive).
+
     Returns the actual body byte count, or -1 if both probes fail.
     Catches SPAs and catch-all proxies that serve the same HTML for every URL —
     these may differ from the canary baseline but still match the homepage body.
-
-    Falls back to the requests library when aiohttp fails (SSL negotiation
-    differences, redirect handling quirks, etc.).
     """
     homepage_url = base_url.rstrip("/") + "/"
 
