@@ -297,6 +297,14 @@ async def run_engagement(
     web_count = len(state.web_data) if state.web_data else 0
     console.print(f"  [green]✓[/green] Web analysis: [bold]{web_count}[/bold] services analyzed")
 
+    # Display emails discovered during web analysis
+    _emails = state.recon_data.get("emails", [])
+    if _emails:
+        console.print(
+            f"  [green]✓[/green] Emails: [cyan]{', '.join(_emails[:6])}[/cyan]"
+            + (f"[dim] (+{len(_emails)-6} more)[/dim]" if len(_emails) > 6 else "")
+        )
+
     if state.web_data:
         from modules.waf_bypass import run_waf_bypass_analysis
         with console.status("[cyan]Generating WAF bypass payloads...[/cyan]", spinner="dots"):
@@ -307,6 +315,35 @@ async def run_engagement(
         with console.status("[cyan]Analyzing JWT tokens...[/cyan]", spinner="dots"):
             from modules.jwt_analyzer import run_jwt_analysis
             await run_jwt_analysis(state, console)
+
+    # ── Phase 3b: Technology fingerprinting ───────────────────────────────────
+    print_phase_header("Phase 3b — Technology Fingerprinting", "◆")
+    from modules.fingerprint import run_fingerprint
+    _all_techs: list = []
+    _web_services = state.recon_data.get("web", {})
+    if _web_services:
+        with console.status("[cyan]Fingerprinting technologies...[/cyan]", spinner="dots"):
+            for _port, _winfo in _web_services.items():
+                _base_url = _winfo.get("url", "")
+                if not _base_url:
+                    continue
+                _fp = await run_fingerprint(_base_url, console)
+                _all_techs.extend(_fp.get("technologies", []))
+    state.recon_data["technologies"] = _all_techs
+    if _all_techs:
+        _cat_order = {"Server": 0, "Language": 1, "CMS": 2, "Framework": 3, "Library": 4}
+        for _t in sorted(_all_techs, key=lambda x: _cat_order.get(x.get("category", ""), 9)):
+            _ver = f" [dim]{_t['version']}[/dim]" if _t.get("version") else ""
+            console.print(
+                f"  [dim]→[/dim] [{_t['confidence'] == 'high' and 'cyan' or 'dim'}]"
+                f"{_t['category']}[/]: [bold cyan]{_t['name']}[/bold cyan]{_ver} "
+                f"[dim]({_t['confidence']})[/dim]"
+            )
+        console.print(
+            f"  [green]✓[/green] Technologies: [bold]{len(_all_techs)}[/bold] detected"
+        )
+    else:
+        console.print("  [dim]→ No technologies detected[/dim]")
 
     if stealth:
         await stealth_delay(config)

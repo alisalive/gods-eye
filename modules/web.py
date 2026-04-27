@@ -1,5 +1,5 @@
 """
-Web / WAF Module — XSS, SQLi, WAF bypass analysis
+Web / WAF Module — XSS, SQLi, WAF bypass analysis, email harvesting, cookie analysis.
 """
 
 import asyncio
@@ -7,6 +7,166 @@ import re
 import aiohttp
 import ssl as ssl_lib
 from core.orchestrator import EngagementState, Finding, Severity
+
+
+# ── Email harvesting ──────────────────────────────────────────────────────────
+
+_EMAIL_RE = re.compile(r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b')
+
+_EMAIL_LOCAL_BLACKLIST = frozenset([
+    "noreply", "no-reply", "donotreply", "test", "support",
+    "webmaster", "postmaster", "bounce",
+])
+_EMAIL_DOMAIN_BLACKLIST = frozenset([
+    "example.com", "test.com", "domain.com", "yourdomain.com",
+    "email.com", "sentry.io", "w3.org", "schema.org",
+])
+
+
+def extract_emails(text: str) -> list:
+    """
+    Extract valid, non-placeholder email addresses from HTML / plain text.
+
+    Filters out:
+      - Known placeholder domains (example.com, test.com, …)
+      - Common role-address local-parts (noreply, test, webmaster, …)
+    """
+    if not text or not isinstance(text, str):
+        return []
+    found: set = set()
+    for m in _EMAIL_RE.finditer(text):
+        email = m.group(0).lower()
+        local, _, domain = email.partition("@")
+        if domain in _EMAIL_DOMAIN_BLACKLIST:
+            continue
+        if any(bl in local for bl in _EMAIL_LOCAL_BLACKLIST):
+            continue
+        found.add(email)
+    # Also extract mailto: links (may contain query strings)
+    for m in re.finditer(r'mailto:([^"\'<>\s?#]+)', text, re.IGNORECASE):
+        addr = m.group(1).lower()
+        if re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]{2,}$', addr):
+            local, _, domain = addr.partition("@")
+            if domain not in _EMAIL_DOMAIN_BLACKLIST and \
+               not any(bl in local for bl in _EMAIL_LOCAL_BLACKLIST):
+                found.add(addr)
+    return sorted(found)
+
+
+# ── Cookie security analysis ──────────────────────────────────────────────────
+
+_SESSION_COOKIE_TECH: dict = {
+    "phpsessid":         "PHP",
+    "jsessionid":        "Java/JSP",
+    "laravel_session":   "Laravel",
+    "connect.sid":       "Node.js",
+    "sessionid":         "Django",
+    "aspsessionid":      "ASP.NET",
+    "asp.net_sessionid": "ASP.NET",
+    "_session_id":       "Ruby on Rails",
+}
+
+# Any cookie whose name contains one of these substrings is treated as a
+# session/auth cookie and checked for security flags.
+_SESSION_COOKIE_KEYWORDS = frozenset([
+    "phpsessid", "jsessionid", "laravel_session", "connect.sid",
+    "sessionid", "aspsessionid", "asp.net_sessionid", "_session_id",
+    "sess", "session", "auth", "token",
+])
+
+
+def analyze_set_cookie_headers(set_cookie_list: list) -> tuple:
+    """
+    Parse a list of raw Set-Cookie header values.
+
+    Returns:
+        (tech_names, security_findings)
+        tech_names       — list[str] of technology names inferred from cookie names
+        security_findings — list[dict] with keys: title, severity, description,
+                            evidence, remediation
+    """
+    tech_names: list = []
+    findings: list = []
+
+    for hval in set_cookie_list:
+        if not hval or not isinstance(hval, str):
+            continue
+        parts = [p.strip() for p in hval.split(";")]
+        if not parts:
+            continue
+
+        name_part   = parts[0]
+        cookie_name = (name_part.split("=")[0] if "=" in name_part else name_part).strip()
+        cname_lower = cookie_name.lower()
+
+        # ── Tech detection from well-known session cookie names ───────────────
+        if cname_lower in _SESSION_COOKIE_TECH:
+            tech_names.append(_SESSION_COOKIE_TECH[cname_lower])
+
+        # ── Security flag analysis — only for session/auth cookies ───────────
+        is_session = any(kw in cname_lower for kw in _SESSION_COOKIE_KEYWORDS)
+        if not is_session:
+            continue
+
+        flags = [p.strip().lower() for p in parts[1:]]
+        has_httponly = any("httponly" in f for f in flags)
+        has_secure   = any(f == "secure" or f.startswith("secure;")
+                           or f.startswith("secure ") for f in flags)
+        # "secure" appears as a standalone token
+        has_secure   = has_secure or "secure" in flags
+        samesite     = next((f for f in flags if "samesite" in f), None)
+
+        evidence_snip = hval[:150] + ("…" if len(hval) > 150 else "")
+
+        if not has_httponly:
+            findings.append({
+                "title": f"Session cookie missing HttpOnly flag: {cookie_name}",
+                "severity": "medium",
+                "description": (
+                    f"The '{cookie_name}' cookie does not carry the HttpOnly flag. "
+                    "JavaScript running in the page can read it, enabling session "
+                    "hijacking via XSS."
+                ),
+                "evidence": f"Set-Cookie: {evidence_snip}",
+                "remediation": (
+                    f"Set the HttpOnly attribute: "
+                    f"Set-Cookie: {cookie_name}=...; HttpOnly; Secure; SameSite=Lax"
+                ),
+            })
+
+        if not has_secure:
+            findings.append({
+                "title": f"Session cookie missing Secure flag: {cookie_name}",
+                "severity": "medium",
+                "description": (
+                    f"The '{cookie_name}' cookie does not carry the Secure flag. "
+                    "It may be transmitted over plain HTTP, exposing it to "
+                    "network eavesdropping."
+                ),
+                "evidence": f"Set-Cookie: {evidence_snip}",
+                "remediation": (
+                    f"Add the Secure flag: "
+                    f"Set-Cookie: {cookie_name}=...; HttpOnly; Secure; SameSite=Lax"
+                ),
+            })
+
+        if not samesite:
+            findings.append({
+                "title": f"Session cookie missing SameSite attribute: {cookie_name}",
+                "severity": "low",
+                "description": (
+                    f"The '{cookie_name}' cookie has no SameSite attribute. "
+                    "Browsers may send it with cross-site requests, "
+                    "widening the CSRF attack surface."
+                ),
+                "evidence": f"Set-Cookie: {evidence_snip}",
+                "remediation": (
+                    f"Add SameSite=Lax (or Strict): "
+                    f"Set-Cookie: {cookie_name}=...; HttpOnly; Secure; SameSite=Lax"
+                ),
+            })
+
+    return tech_names, findings
 
 
 # WAF bypass payload sets per WAF type
@@ -131,6 +291,30 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "Referrer info control",
     "Permissions-Policy": "Feature policy",
 }
+
+
+_EMAIL_HARVEST_PATHS = ["/", "/contact", "/about", "/robots.txt"]
+
+
+async def harvest_emails_from_pages(session, base_url: str) -> list:
+    """
+    Fetch several common pages and return de-duplicated email addresses.
+    Errors on individual paths are silently swallowed.
+    """
+    all_emails: set = set()
+    for path in _EMAIL_HARVEST_PATHS:
+        try:
+            url = base_url.rstrip("/") + path
+            async with session.get(
+                url, allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=6),
+            ) as resp:
+                body = await resp.text(errors="ignore")
+                if isinstance(body, str):
+                    all_emails.update(extract_emails(body))
+        except Exception:
+            pass
+    return sorted(all_emails)
 
 
 async def check_endpoint(session, base_url: str, path: str) -> dict:
@@ -357,6 +541,64 @@ async def run_web_analysis(state: EngagementState, console=None) -> dict:
             # Security headers
             log(f"Checking security headers: {base_url}")
             port_data["security_headers"] = await check_security_headers(session, base_url)
+
+            # ── Cookie security analysis + tech fingerprint from cookies ─────
+            log(f"Analyzing cookies: {base_url}")
+            try:
+                async with session.get(
+                    base_url,
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as _cookie_resp:
+                    try:
+                        _set_cookie_hdrs = list(_cookie_resp.headers.getall("Set-Cookie", []))
+                    except (AttributeError, TypeError):
+                        _sc = (_cookie_resp.headers.get("Set-Cookie") or "")
+                        _set_cookie_hdrs = [_sc] if _sc else []
+
+                _cookie_techs, _cookie_sec = analyze_set_cookie_headers(_set_cookie_hdrs)
+
+                for _tn in dict.fromkeys(_cookie_techs):   # ordered-unique
+                    _add(Finding(
+                        title=f"Technology fingerprint from cookie: {_tn}",
+                        severity=Severity.INFO,
+                        description=(
+                            f"Server-side technology detected from session cookie name: {_tn}. "
+                            "Consider using generic cookie names to reduce information disclosure."
+                        ),
+                        evidence=f"Session cookie name pattern on {base_url}",
+                        mitre_tactic="Discovery",
+                        mitre_technique="T1082 - System Information Discovery",
+                        remediation="Use opaque, technology-neutral cookie names.",
+                        phase="web",
+                    ))
+
+                for _cf in _cookie_sec:
+                    _add(Finding(
+                        title=_cf["title"],
+                        severity=Severity(_cf["severity"]),
+                        description=_cf["description"],
+                        evidence=_cf["evidence"],
+                        mitre_tactic="Credential Access",
+                        mitre_technique="T1539 - Steal Web Session Cookie",
+                        remediation=_cf["remediation"],
+                        phase="web",
+                    ))
+            except Exception:
+                pass
+
+            # ── Email harvesting ─────────────────────────────────────────────
+            log(f"Harvesting emails from {base_url} ...")
+            try:
+                _port_emails = await harvest_emails_from_pages(session, base_url)
+                if _port_emails:
+                    _existing = set(state.recon_data.get("emails", []))
+                    _existing.update(_port_emails)
+                    state.recon_data["emails"] = sorted(_existing)
+                    log(f"Emails: {', '.join(_port_emails[:5])}"
+                        + (f" (+{len(_port_emails)-5} more)" if len(_port_emails) > 5 else ""))
+            except Exception:
+                pass
 
             missing_hdrs = port_data["security_headers"].get("missing", [])
             if len(missing_hdrs) >= 3:

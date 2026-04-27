@@ -114,6 +114,97 @@ def _cve_table_section(cve_data: dict) -> str:
     </div>"""
 
 
+def _technologies_section(technologies: list) -> str:
+    if not technologies:
+        return ""
+    _cat_order = {"Server": 0, "Language": 1, "CMS": 2, "Framework": 3, "Library": 4}
+    sorted_techs = sorted(technologies,
+                          key=lambda t: (_cat_order.get(t.get("category", ""), 9),
+                                         t.get("name", "").lower()))
+    _conf_color = {
+        "high":   C["green"],
+        "medium": C["medium"],
+        "low":    C["muted"],
+    }
+    rows = ""
+    for t in sorted_techs:
+        name     = _escape(t.get("name", ""))
+        version  = _escape(t.get("version", ""))
+        conf     = t.get("confidence", "low")
+        category = _escape(t.get("category", ""))
+        evidence = _escape(t.get("evidence", ""))
+        color    = _conf_color.get(conf, C["muted"])
+        ver_badge = (
+            f"<span style='font-family:monospace;font-size:10px;padding:1px 6px;"
+            f"border-radius:3px;background:{C['cyan']}22;color:{C['cyan']};"
+            f"border:1px solid {C['cyan']}33;margin-left:6px'>{version}</span>"
+        ) if version else ""
+        conf_badge = (
+            f"<span style='font-family:monospace;font-size:10px;font-weight:700;"
+            f"text-transform:uppercase;padding:2px 7px;border-radius:3px;"
+            f"background:{color}22;color:{color};border:1px solid {color}44;"
+            f"letter-spacing:1px'>{conf}</span>"
+        )
+        rows += f"""
+        <tr class='trow'>
+          <td style='font-weight:700;color:{C["text"]}'>{name}{ver_badge}</td>
+          <td style='font-family:monospace;font-size:12px;color:{C["cyan"]}'>{category}</td>
+          <td>{conf_badge}</td>
+          <td style='font-size:11px;color:{C["muted"]};font-family:monospace'>{evidence}</td>
+        </tr>"""
+    return f"""
+    <div class='section'>
+      <h2 class='section-title'>&#x25b6; Detected Technologies
+        <span class='count-badge'>{len(technologies)}</span>
+      </h2>
+      <p style='font-size:12px;color:{C["muted"]};font-family:monospace;margin-bottom:14px'>
+        // CMS, frameworks, libraries and server-side stack identified via headers, body analysis and path probing
+      </p>
+      <div style='overflow-x:auto'>
+        <table class='data-table'>
+          <thead><tr>
+            <th>Technology</th><th>Category</th><th>Confidence</th><th>Evidence</th>
+          </tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </div>"""
+
+
+def _emails_section(emails: list) -> str:
+    if not emails:
+        return ""
+    _cyan  = C["cyan"]
+    _card2 = C["card2"]
+    _bdr   = C["border"]
+    _muted = C["muted"]
+    items = "".join(
+        "<span style='font-family:monospace;font-size:12px;color:{cyan};"
+        "background:{card2};border:1px solid {bdr};border-radius:3px;"
+        "padding:3px 10px;margin:3px 4px;display:inline-block'>"
+        "<a href='mailto:{addr}' style='color:{cyan};text-decoration:none'>"
+        "{addr}</a></span>".format(
+            cyan=_cyan, card2=_card2, bdr=_bdr, addr=_escape(e)
+        )
+        for e in emails[:60]
+    )
+    extra = (
+        "<div style='font-size:11px;color:{muted};font-family:monospace;margin-top:8px'>"
+        "// {n} more addresses not shown</div>".format(muted=_muted, n=len(emails) - 60)
+    ) if len(emails) > 60 else ""
+    return f"""
+    <div class='section'>
+      <h2 class='section-title'>&#x25b6; Harvested Emails
+        <span class='count-badge'>{len(emails)}</span>
+      </h2>
+      <p style='font-size:12px;color:{C["muted"]};font-family:monospace;margin-bottom:14px'>
+        // Email addresses discovered from homepage, /contact, /about, /robots.txt
+      </p>
+      <div>{items}</div>
+      {extra}
+    </div>"""
+
+
 def _real_ip_section(real_ips: list) -> str:
     if not real_ips:
         return ""
@@ -429,7 +520,7 @@ def generate_html_report(state: EngagementState, ai_analysis: dict = None) -> st
           {plan_items}
         </div>"""
 
-    # ── Screenshots / CVE / OPSEC / Kill chain / Real IP ─────────────────────
+    # ── Screenshots / CVE / OPSEC / Kill chain / Real IP / Tech / Emails ────
     screenshots    = state.recon_data.get("screenshots", {})
     screenshot_html = _screenshot_section(screenshots)
     cve_data        = getattr(state, "cve_data", {})
@@ -438,6 +529,8 @@ def generate_html_report(state: EngagementState, ai_analysis: dict = None) -> st
     opsec_html      = _opsec_timeline_section(opsec_data, state.mode.value)
     kill_chain_html = _kill_chain_section(state)
     real_ip_html    = _real_ip_section(state.recon_data.get("real_ips", []))
+    tech_html       = _technologies_section(state.recon_data.get("technologies", []))
+    emails_html     = _emails_section(state.recon_data.get("emails", []))
 
     # ── Stat bars (CSS animated) ──────────────────────────────────────────────
     def stat_bar(label, count, color, delay_ms=0):
@@ -825,6 +918,10 @@ body{{
 
   {real_ip_html}
 
+  {tech_html}
+
+  {emails_html}
+
   {subdomain_html}
 
   {ports_html}
@@ -933,6 +1030,8 @@ def save_report(state: EngagementState, ai_analysis: dict = None,
             "web_ports":        list(state.recon_data.get("web", {}).keys()),
             "subdomains_found": len(state.recon_data.get("subdomains", {}).get("found", [])),
         },
+        "technologies":  state.recon_data.get("technologies", []),
+        "emails":        state.recon_data.get("emails", []),
         "ad_detected":   state.ad_data.get("ad_detected", False),
         "cve_total":     getattr(state, "cve_data", {}).get("total", 0),
         "opsec_score":   state.opsec_score,
